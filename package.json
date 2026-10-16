@@ -1,0 +1,24 @@
+{
+    "name": "persona-agent",
+    "version": "2.0.0",
+    "private": true,
+    "type": "module",
+    "description": "เพื่อนแชทบุคลิกเทียมแบบหน้าเว็บ จำบทสนทนาและสิ่งที่สอนลงไฟล์ .md ในเครื่อง ใช้ Claude ในเครื่องหรือ API key เป็นสมอง",
+    "scripts": {
+        "dev": "node scripts/run.js",
+        "build": "vite build",
+        "start": "vite build && node scripts/run.js --prod"
+    },
+    "engines": {
+        "node": ">=20.12"
+    },
+    "dependencies": {
+        "@anthropic-ai/sdk": "^0.133.0",
+        "web-push": "^3.6.7"
+    },
+    "devDependencies": {
+        "@tailwindcss/vite": "^4.1.0",
+        "tailwindcss": "^4.1.0",
+        "vite": "^7.0.0"
+    }
+}

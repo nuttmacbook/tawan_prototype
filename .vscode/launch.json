@@ -1,0 +1,17 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "เปิดเพื่อนแชท",
+            "type": "node",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/run.js",
+            "console": "integratedTerminal",
+            "serverReadyAction": {
+                "pattern": "→ (http://localhost:\\d+)",
+                "uriFormat": "%s",
+                "action": "openExternally"
+            }
+        }
+    ]
+}

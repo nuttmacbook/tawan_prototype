@@ -1,0 +1,73 @@
+@import "tailwindcss";
+
+@theme {
+    --font-sans: "IBM Plex Sans Thai", ui-sans-serif, system-ui, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, monospace;
+}
+
+html {
+    /* No double-tap zoom on text and buttons, and no font inflation when turning the phone */
+    touch-action: manipulation;
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+}
+
+html,
+body {
+    background:
+        radial-gradient(60rem 30rem at 85% -10%, rgb(56 189 248 / 0.10), transparent 60%),
+        radial-gradient(40rem 24rem at -10% 110%, rgb(244 114 182 / 0.07), transparent 60%),
+        #020617;
+}
+
+/* Typing dots: three dots that rise one after another */
+@keyframes typing-dot {
+    0%, 60%, 100% { transform: translateY(0); opacity: 0.35; }
+    30%           { transform: translateY(-4px); opacity: 1; }
+}
+
+.typing-dot {
+    animation: typing-dot 1.2s infinite ease-in-out;
+}
+.typing-dot:nth-child(2) { animation-delay: 0.15s; }
+.typing-dot:nth-child(3) { animation-delay: 0.3s; }
+
+@keyframes bubble-in {
+    from { transform: translateY(6px) scale(0.98); opacity: 0; }
+    to   { transform: none; opacity: 1; }
+}
+
+.bubble-in {
+    animation: bubble-in 0.22s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .typing-dot,
+    .bubble-in {
+        animation: none;
+    }
+}
+
+/* Full role: hide everything that reveals the machinery (notes, moods, brain, tabs, timing) */
+.full-role [data-debug] {
+    display: none !important;
+}
+
+/* Slim scrollbars for the chat and editor */
+.scroll-slim {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(148 163 184 / 0.25) transparent;
+}
+
+/* Phones zoom into any field whose text is under 16px; keep fields at 16px on touch screens.
+   Inside the utilities layer so it outranks Tailwind's text-sm and !text-xs on those fields. */
+@layer utilities {
+    @media (pointer: coarse) {
+        /* :not(.keep-zoom) adds class weight so this beats single-class utilities like !text-xs */
+        input:not([type="checkbox"]):not([type="radio"]):not([type="file"]):not(.keep-zoom),
+        textarea:not(.keep-zoom),
+        select:not(.keep-zoom) {
+            font-size: 16px !important;
+        }
+    }
+}

@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env
+data/.brain/
+data/settings.json
+data/.backups/
+data/.snapshots/
+data/.trash/
+data/.tunnel.json
+data/push.json
