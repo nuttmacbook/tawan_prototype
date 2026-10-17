@@ -9,6 +9,9 @@ import path from "node:path";
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
 const RESTART_MARK = path.join(ROOT, "data", ".backups", "pending-restart.json");
 const TUNNEL_FILE = path.join(ROOT, "data", ".tunnel.json");
+// An empty config of our own: cloudflared otherwise loads ~/.cloudflared/config.yml, whose ingress rules
+// win over --url, so a leftover named-tunnel setup makes every page answer 404
+const TUNNEL_CONFIG = path.join(ROOT, "data", ".tunnel-config.yml");
 const SETTINGS_FILE = path.join(ROOT, "data", "settings.json");
 const RESTART_CODE = 75;
 const CRASH_WINDOW_MS = 10000;
@@ -82,9 +85,14 @@ async function waitForKey() {
  * https://….trycloudflare.com address it prints, so the page can show it.
  * It lives in the runner, not the server, so editlogic restarts don't change the address.
  */
-function startTunnel() {
+async function startTunnel() {
     let isAnnounced = false;
-    tunnel = spawn(CLOUDFLARED, [ "tunnel", "--no-autoupdate", "--url", `http://localhost:${PORT}` ], {
+    await mkdir(path.dirname(TUNNEL_CONFIG), { recursive: true });
+    await writeFile(TUNNEL_CONFIG, "# Written by scripts/run.js so a personal ~/.cloudflared/config.yml can't redirect this quick tunnel\nno-autoupdate: true\n");
+    // 127.0.0.1, not localhost: Windows may resolve localhost to ::1, where this server isn't listening
+    // Through cmd.exe on Windows, so a project folder with spaces needs quotes
+    const configArg = process.platform === "win32" ? `"${TUNNEL_CONFIG}"` : TUNNEL_CONFIG;
+    tunnel = spawn(CLOUDFLARED, [ "tunnel", "--config", configArg, "--no-autoupdate", "--url", `http://127.0.0.1:${PORT}` ], {
         cwd: ROOT,
         shell: process.platform === "win32",
     });
@@ -123,10 +131,16 @@ function startTunnel() {
 
 /* ------------------------------------ lifecycle */
 
+// On Windows the tunnel runs through cmd.exe; killing only cmd.exe would leave cloudflared running
+function killTree(child) {
+    if (process.platform !== "win32" || !child?.pid) return child?.kill();
+    spawn("taskkill", [ "/pid", String(child.pid), "/T", "/F" ], { stdio: "ignore" }).on("error", () => child.kill());
+}
+
 function stop(code = 0) {
     if (tunnel) {
         tunnel.isStopping = true;
-        tunnel.kill();
+        killTree(tunnel);
     }
     rm(TUNNEL_FILE, { force: true }).finally(() => process.exit(code));
 }

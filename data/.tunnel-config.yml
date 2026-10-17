@@ -1,0 +1,2 @@
+# Written by scripts/run.js so a personal ~/.cloudflared/config.yml can't redirect this quick tunnel
+no-autoupdate: true
