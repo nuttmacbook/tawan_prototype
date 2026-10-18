@@ -179,3 +179,57 @@ test("replaceLoggedLine: a cut reply keeps only what was shown", async () => {
     await store.replaceLoggedLine(gone, null);
     assert.notEqual((await store.todayEntries()).at(-1).text, "ทั้งหมด");
 });
+
+/* ------------------------------------ settings page */
+
+test("config: saved values win over defaults, and are kept in range", async () => {
+    const config = await import("../server/config.js");
+    const saved = await config.setConfig({ idleMinutes: 999, awayPingHours: "0", pushPreview: false, unknown: 5 });
+    assert.equal(saved.idleMinutes, 240);
+    assert.equal(saved.awayPingHours, 0);
+    assert.equal(saved.pushPreview, false);
+    assert.equal("unknown" in saved, false);
+    assert.equal((await config.getConfig()).memoryBudget, 3500);
+});
+
+/* ------------------------------------ memory without duplicates */
+
+test("remember: the same fact again updates it instead of adding a copy", async () => {
+    const memoryFile = profiles.fileOf("memory");
+    await writeFile(memoryFile, "# ความจำ\n\n## ความชอบ\n- [2026-01-01] ชอบกินชาบู\n- [2026-01-01] ชอบชาเขียว\n");
+    assert.match(await store.remember("ความชอบ", "ชอบกินชาบู"), /อัปเดต/);
+    assert.match(await store.remember("ความชอบ", "ชอบกินชาบูร้านใกล้บ้าน"), /อัปเดต/);
+    assert.match(await store.remember("ความชอบ", "ชอบกินชาบู"), /รู้อยู่แล้ว/);
+    assert.match(await store.remember("ความชอบ", "ชอบกินส้มตำ"), /จำแล้ว/);
+    const facts = (await readFile(memoryFile, "utf8")).split("\n").filter((l) => l.startsWith("- "));
+    assert.deepEqual(facts.map((l) => l.replace(/^- \[[\d-]+\] /, "")), [ "ชอบชาเขียว", "ชอบกินชาบูร้านใกล้บ้าน", "ชอบกินส้มตำ" ]);
+});
+
+test("remember: a fact moved to a new topic leaves no empty heading behind", async () => {
+    const memoryFile = profiles.fileOf("memory");
+    await writeFile(memoryFile, "# ความจำ\n\n## ทั่วไป\n- [2026-01-01] ทำงานที่ขอนแก่น\n");
+    await store.remember("งาน", "ทำงานที่ขอนแก่น");
+    const text = await readFile(memoryFile, "utf8");
+    assert.equal(text.includes("## ทั่วไป"), false);
+    assert.match(text, /## งาน\n- \[[\d-]+\] ทำงานที่ขอนแก่น/);
+});
+
+test("remember: saying the opposite replaces the old fact", async () => {
+    const memoryFile = profiles.fileOf("memory");
+    await writeFile(memoryFile, "# ความจำ\n\n## เกี่ยวกับผู้ใช้\n- [2026-01-01] ไม่มีแมว\n");
+    assert.match(await store.remember("เกี่ยวกับผู้ใช้", "มีแมว"), /อัปเดต/);
+    const facts = (await readFile(memoryFile, "utf8")).split("\n").filter((l) => l.startsWith("- "));
+    assert.equal(facts.length, 1);
+    assert.match(facts[0], /\] มีแมว$/);
+});
+
+test("remember: facts about someone else or with other numbers stay separate", async () => {
+    const memoryFile = profiles.fileOf("memory");
+    await writeFile(memoryFile, "# ความจำ\n\n## เกี่ยวกับผู้ใช้\n- [2026-01-01] ชอบแมว\n- [2026-01-01] สอบวันที่ 5\n\n## คนรอบตัว\n- [2026-01-01] แฟนชอบหมา\n");
+    assert.match(await store.remember("คนรอบตัว", "แฟนชอบแมว"), /จำแล้ว/);
+    assert.match(await store.remember("เกี่ยวกับผู้ใช้", "สอบวันที่ 12"), /จำแล้ว/);
+    assert.match(await store.remember("เกี่ยวกับผู้ใช้", "สอบวันที่ 1"), /จำแล้ว/);
+    assert.match(await store.remember("เกี่ยวกับผู้ใช้", "ไม่มีแมวแต่มีหมา"), /จำแล้ว/);
+    const facts = (await readFile(memoryFile, "utf8")).split("\n").filter((l) => l.startsWith("- ")).map((l) => l.replace(/^- \[[\d-]+\] /, ""));
+    for (const f of [ "ชอบแมว", "สอบวันที่ 5", "สอบวันที่ 12", "สอบวันที่ 1", "แฟนชอบหมา", "แฟนชอบแมว", "ไม่มีแมวแต่มีหมา" ]) assert.ok(facts.includes(f), f);
+});

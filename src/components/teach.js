@@ -228,6 +228,45 @@ const portableCard = (state) => /*html*/`
     </section>
 `;
 
+/* ------------------------------------ app settings */
+
+/**
+ * One row per setting. The list (labels, limits) comes from the server, so a new setting
+ * only needs adding in server/config.js.
+ * @param {{ fields?: { key: string, type: string, label: string, min?: number, max?: number }[], values?: object }} config
+ */
+const configFields = (config) => {
+    const fields = Array.isArray(config?.fields) ? config.fields : [];
+    if (!fields.length) return `<p class="text-xs text-slate-500">กำลังโหลด...</p>`;
+    return fields.map((f) => {
+        const value = config?.values?.[f.key];
+        const control = f.type === "bool"
+            ? `<input type="checkbox" class="h-4 w-4 shrink-0 accent-sky-500" data-config-key="${esc(f.key)}" ${value ? "checked" : ""} />`
+            : `<input type="number" inputmode="numeric" class="${INPUT} !w-28 shrink-0 !py-1.5 text-right" data-config-key="${esc(f.key)}" min="${Number(f.min ?? 0)}" max="${Number(f.max ?? 0)}" value="${esc(value)}" />`;
+        return /*html*/`
+            <label class="flex items-center gap-3 text-xs text-slate-300">
+                <span class="min-w-0 flex-1">${esc(f.label)}</span>
+                ${control}
+            </label>
+        `;
+    }).join("");
+};
+
+const settingsCard = (state) => /*html*/`
+    <section class="${CARD} space-y-3 p-4 sm:p-5">
+        <header>
+            <p class="${EYEBROW}">ตั้งค่าแอป</p>
+            <h2 class="text-base font-semibold text-white">จังหวะทัก · ความจำ · แจ้งเตือน</h2>
+            <p class="text-xs text-slate-400">ใช้กับทุกตัวละคร มีผลทันทีไม่ต้องรีสตาร์ท · ค่าเริ่มต้นมาจากไฟล์ .env</p>
+        </header>
+        <div class="space-y-2" data-config-fields>${configFields(state?.config)}</div>
+        <div class="flex items-center gap-2">
+            <button type="button" class="${BTN} !py-2 text-xs" onclick="saveConfig()">บันทึกการตั้งค่า</button>
+            <span class="truncate text-xs text-slate-400" data-config-msg role="status"></span>
+        </div>
+    </section>
+`;
+
 const teachPanel = (state) => /*html*/`
     <section data-tab-panel="teach" class="scroll-slim min-h-0 flex-1 space-y-3 overflow-y-auto pb-2 ${state?.tab === "teach" ? "" : "hidden"}">
         <div class="grid gap-3 lg:grid-cols-2">
@@ -243,7 +282,8 @@ const teachPanel = (state) => /*html*/`
             ${snapshotsCard(state)}
             ${portableCard(state)}
         </div>
+        ${settingsCard(state)}
     </section>
 `;
 
-export { teachPanel, lessonList, snapshotList, FILES };
+export { teachPanel, lessonList, snapshotList, configFields, FILES };

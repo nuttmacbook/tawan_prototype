@@ -37,85 +37,218 @@ function killTree(child) {
     spawn("taskkill", [ "/pid", String(child.pid), "/T", "/F" ], { stdio: "ignore" }).on("error", () => child.kill());
 }
 
-function runProcess(args, { input = "", timeout = CC_TIMEOUT_MS, cwd = BRAIN_ROOT } = {}) {
-    return new Promise((resolve, reject) => {
-        const child = isWin
-            ? spawn([ CLAUDE_BIN, ...args ].map(quoteWin).join(" "), { cwd, env: ccEnv(), shell: true })
-            : spawn(CLAUDE_BIN, args, { cwd, env: ccEnv() });
+/**
+ * Starts claude and returns a handle; the prompt is sent later with send(). Starting early lets
+ * Node and Claude Code load while you're still typing, so the reply doesn't wait for that.
+ */
+function startProcess(args, { cwd = BRAIN_ROOT } = {}) {
+    const child = isWin
+        ? spawn([ CLAUDE_BIN, ...args ].map(quoteWin).join(" "), { cwd, env: ccEnv(), shell: true })
+        : spawn(CLAUDE_BIN, args, { cwd, env: ccEnv() });
 
-        let out = "";
-        let err = "";
-        const timer = setTimeout(() => {
-            killTree(child);
-            reject(new Error("Claude ในเครื่องตอบช้าเกินไป ลองใหม่อีกครั้ง"));
-        }, timeout);
-
-        child.stdout.on("data", (d) => (out += d));
-        child.stderr.on("data", (d) => (err += d));
+    let out = "";
+    let err = "";
+    let spawnError = null;
+    child.stdout.on("data", (d) => (out += d));
+    child.stderr.on("data", (d) => (err += d));
+    const exited = new Promise((resolve) => {
         child.on("error", (e) => {
-            clearTimeout(timer);
-            reject(new Error(e?.code === "ENOENT" ? "ไม่พบคำสั่ง claude ในเครื่อง ติดตั้ง Claude Code ก่อน" : e.message));
+            spawnError = e;
+            resolve();
         });
-        child.on("close", (code) => {
-            clearTimeout(timer);
-            resolve({ code, out, err });
-        });
+        child.on("close", (code) => resolve(code));
+    });
 
-        child.stdin.end(input);
+    return {
+        child,
+        /** Still waiting for its prompt (it can quit on its own while idle) */
+        isAlive: () => child.exitCode == null && child.signalCode == null && !spawnError && !child.killed,
+        kill: () => killTree(child),
+        send(input, timeout = CC_TIMEOUT_MS) {
+            return new Promise((resolve, reject) => {
+                const timer = setTimeout(() => {
+                    killTree(child);
+                    reject(new Error("Claude ในเครื่องตอบช้าเกินไป ลองใหม่อีกครั้ง"));
+                }, timeout);
+                exited.then((code) => {
+                    clearTimeout(timer);
+                    if (spawnError) {
+                        reject(new Error(spawnError?.code === "ENOENT" ? "ไม่พบคำสั่ง claude ในเครื่อง ติดตั้ง Claude Code ก่อน" : spawnError.message));
+                    } else {
+                        resolve({ code, out, err });
+                    }
+                });
+                child.stdin.on("error", () => {});
+                child.stdin.end(input);
+            });
+        },
+    };
+}
+
+function runProcess(args, { input = "", timeout = CC_TIMEOUT_MS, cwd = BRAIN_ROOT } = {}) {
+    return startProcess(args, { cwd }).send(input, timeout);
+}
+
+const replyArgs = (systemFile, imageCount) => [
+    "-p",
+    "--output-format", "json",
+    "--system-prompt-file", systemFile,
+    "--model", CC_MODEL,
+    "--max-turns", imageCount ? String(2 + imageCount) : "2",
+    "--no-session-persistence",
+    "--strict-mcp-config",
+    // Variadic flags go last; the prompt arrives on stdin, not as an argument.
+    // Read is allowed for the copied pictures only: a bare "Read" would let a crafted persona file
+    // talk her into opening anything on this computer (~/.ssh, .env) and quoting it in chat.
+    ...(imageCount ? [ "--tools", "Read", "--allowedTools", "Read(./img-*)" ] : [ "--disallowedTools", "*" ]),
+];
+
+/* ------------------------------------ a claude started ahead of time */
+
+// CLAUDE_PREWARM=0 turns this off if your Claude Code version doesn't like waiting for its prompt
+// CLAUDE_PREWARM=0 turns this off if your Claude Code version doesn't like waiting for its prompt
+let prewarm = !/^(0|false|no)$/i.test(String(process.env.CLAUDE_PREWARM ?? ""));
+const SPARE_IDLE_MS = 15 * 60000;
+// Some Claude Code versions give up when no prompt arrives within a few seconds; after this many
+// spares found already gone, starting them ahead is only wasted work, so it switches itself off
+const MAX_DEAD_SPARES = 3;
+const EARLY_EXIT_MS = 4000;
+
+/** One claude process already started for the next chat reply, with the same system prompt */
+let spare = null;
+let spareGeneration = 0;
+let deadSpares = 0;
+
+function dropSpare() {
+    const old = spare;
+    spare = null;
+    if (!old) return;
+    clearTimeout(old.idleTimer);
+    old.proc.kill();
+    old.cleanup();
+}
+
+/** Starts the next reply's claude in the background; the system prompt only changes when files are edited */
+function prepareSpare(system) {
+    if (!prewarm) return;
+    dropSpare();
+    // If two of these overlap, the newest wins: it has the latest system prompt
+    const generation = ++spareGeneration;
+    prepareRun(system, []).then((run) => {
+        if (generation !== spareGeneration) {
+            run.proc.kill();
+            run.cleanup();
+            return;
+        }
+        // An idle claude shouldn't sit there forever
+        run.idleTimer = setTimeout(() => {
+            if (spare === run) dropSpare();
+        }, SPARE_IDLE_MS);
+        spare = run;
+    }).catch(() => {});
+}
+
+/** Takes the spare if it fits this call; notes it when one died while waiting */
+function takeSpare(system) {
+    if (!spare || spare.system !== system) return null;
+    const run = spare;
+    spare = null;
+    clearTimeout(run.idleTimer);
+    if (run.proc.isAlive()) {
+        deadSpares = 0;
+        return run;
+    }
+    run.cleanup();
+    if (++deadSpares >= MAX_DEAD_SPARES && prewarm) {
+        prewarm = false;
+        console.log("  ℹ Claude Code เวอร์ชันนี้ไม่รอข้อความที่เปิดไว้ล่วงหน้า ปิดการเตรียมล่วงหน้าไปก่อน (ตั้ง CLAUDE_PREWARM=0 ได้ถ้าไม่อยากให้ลอง)");
+    }
+    return null;
+}
+
+// A spare left behind would be waiting on a prompt that never comes; stop it with the server.
+// Exit code 0 on a signal: the runner treats Ctrl+C and stop requests as a normal stop, not a crash.
+process.on("exit", () => spare?.proc.kill());
+for (const signal of [ "SIGINT", "SIGTERM" ]) {
+    process.once(signal, () => {
+        spare?.proc.kill();
+        process.exit(0);
     });
 }
 
 /**
  * Asks the user's own logged-in Claude Code for one reply, with all built-in tools turned off.
- * @param {{ system: string, prompt: string }} req
+ * @param {{ system: string, prompt: string, images?: string[], keepWarm?: boolean }} req
+ *   keepWarm: chat replies; the next one will likely use the same system prompt, so start it now
  * @returns {Promise<string>} the model's text
  */
-export async function askClaudeCode({ system, prompt, images = [] }) {
-    // A folder of its own per call: a memory tidy-up running in the background must never
-    // swap its prompt or pictures with the chat reply being written at the same time
-    await mkdir(BRAIN_ROOT, { recursive: true });
-    const dir = await mkdtemp(path.join(BRAIN_ROOT, "run-"));
+export async function askClaudeCode({ system, prompt, images = [], keepWarm = false }) {
+    const started = Date.now();
+    // Use the claude started ahead of time when it's ready, alive and set up for this same system prompt
+    let run = images.length ? null : takeSpare(system);
+    let isWarm = Boolean(run);
+
     try {
-        return await askIn(dir, { system, prompt, images });
+        let result;
+        try {
+            if (!run) run = await prepareRun(system, images);
+            result = await finish(run, prompt);
+        } catch (err) {
+            // Only a spare that quit the moment it got the prompt is retried the normal way.
+            // A real answer that failed (timeout, usage limit, model error) is not: that would double the wait and the cost.
+            if (!isWarm || !err?.isEarlyExit) throw err;
+            run.cleanup();
+            run = await prepareRun(system, images);
+            isWarm = false;
+            result = await finish(run, prompt);
+        }
+        lastUsage = { ...(lastUsage ?? {}), ms: Date.now() - started, isWarm };
+        return result;
     } finally {
-        await rm(dir, { recursive: true, force: true }).catch(() => {});
+        run?.cleanup();
+        if (keepWarm && !images.length) prepareSpare(system);
     }
 }
 
-async function askIn(dir, { system, prompt, images }) {
-    const systemFile = path.join(dir, "system.md");
-    await writeFile(systemFile, system);
-
-    // Pictures are copied next to the prompt so Claude can open them with Read, its only tool here
-    const names = [];
-    for (const [ i, file ] of images.entries()) {
-        const name = `img-${i}${path.extname(file) || ".jpg"}`;
-        try {
-            await copyFile(file, path.join(dir, name));
-            names.push(name);
-        } catch {
-            // A picture that's gone shouldn't block the whole reply
+/**
+ * A folder of its own per call: a memory tidy-up running in the background must never
+ * swap its prompt or pictures with the chat reply being written at the same time.
+ */
+async function prepareRun(system, images) {
+    await mkdir(BRAIN_ROOT, { recursive: true });
+    const dir = await mkdtemp(path.join(BRAIN_ROOT, "run-"));
+    const cleanup = () => rm(dir, { recursive: true, force: true }).catch(() => {});
+    try {
+        const systemFile = path.join(dir, "system.md");
+        await writeFile(systemFile, system);
+        // Pictures are copied next to the prompt so Claude can open them with Read, its only tool here
+        const names = [];
+        for (const [ i, file ] of images.entries()) {
+            const name = `img-${i}${path.extname(file) || ".jpg"}`;
+            try {
+                await copyFile(file, path.join(dir, name));
+                names.push(name);
+            } catch {
+                // A picture that's gone shouldn't block the whole reply
+            }
         }
+        const proc = startProcess(replyArgs(systemFile, names.length), { cwd: dir });
+        return { dir, system, proc, cleanup, names };
+    } catch (err) {
+        await cleanup();
+        throw err;
     }
+}
+
+async function finish(run, prompt) {
+    const names = run.names ?? [];
     const imageNote = names.length
         ? `\n\nผู้ใช้ส่งรูปมา ${names.length} รูป ใช้เครื่องมือ Read เปิดดูไฟล์ ${names.map((n) => `./${n}`).join(", ")} ก่อนตอบ`
         : "";
-
-    const args = [
-        "-p",
-        "--output-format", "json",
-        "--system-prompt-file", systemFile,
-        "--model", CC_MODEL,
-        "--max-turns", names.length ? String(2 + names.length) : "2",
-        "--no-session-persistence",
-        "--strict-mcp-config",
-        // Variadic flags go last; the prompt arrives on stdin, not as an argument.
-        // Read is allowed for the copied pictures only: a bare "Read" would let a crafted persona file
-        // talk her into opening anything on this computer (~/.ssh, .env) and quoting it in chat.
-        ...(names.length ? [ "--tools", "Read", "--allowedTools", "Read(./img-*)" ] : [ "--disallowedTools", "*" ]),
-    ];
-
-    const { code, out, err } = await runProcess(args, { input: `${prompt}${imageNote}`, cwd: dir });
+    const sentAt = Date.now();
+    const { code, out, err } = await run.proc.send(`${prompt}${imageNote}`);
+    // Quit straight away with nothing on stdout: it never got to work on the prompt
+    const isEarlyExit = code !== 0 && !String(out).trim() && Date.now() - sentAt < EARLY_EXIT_MS;
 
     let parsed = null;
     try {
@@ -129,7 +262,9 @@ async function askIn(dir, { system, prompt, images }) {
         if (/login|auth|credential|401/i.test(reason)) {
             throw new Error("Claude ในเครื่องยังไม่ได้ล็อกอิน เปิด terminal แล้วพิมพ์ claude เพื่อล็อกอินก่อน");
         }
-        throw new Error(`Claude ในเครื่องผิดพลาด: ${reason.slice(0, 300)}`);
+        const error = new Error(`Claude ในเครื่องผิดพลาด: ${reason.slice(0, 300)}`);
+        error.isEarlyExit = isEarlyExit;
+        throw error;
     }
 
     lastUsage = usageOf(parsed?.usage, parsed?.total_cost_usd);

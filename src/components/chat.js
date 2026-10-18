@@ -254,6 +254,7 @@ const promptMeter = (prompt) => {
             <p class="text-[11px] text-slate-400">
                 ความจำส่ง ${Number(prompt.memory?.kept ?? 0)}/${Number(prompt.memory?.total ?? 0)} เรื่อง · สิ่งที่สอน ${Number(prompt.teachings?.kept ?? 0)}/${Number(prompt.teachings?.total ?? 0)}
             </p>
+            ${u?.ms ? `<p class="text-[11px] text-slate-400">สมองใช้เวลา <span class="font-mono tabular-nums">${(Number(u.ms) / 1000).toFixed(1)}</span> วิ${u.isWarm ? " · ใช้ตัวที่เตรียมไว้ล่วงหน้า" : ""}</p>` : ""}
             ${u ? `<p class="text-[11px] text-slate-400">ใช้จริง: เข้า <span class="font-mono tabular-nums">${k(u.input)}</span> tokens${u.cached ? ` (แคช ${k(u.cached)})` : ""} · ออก <span class="font-mono tabular-nums">${k(u.output)}</span>${u.cost != null ? ` · $${Number(u.cost).toFixed(4)}` : ""}</p>` : ""}
             ${isBig ? `<p class="text-[11px] text-amber-300/90">ใหญ่เกิน ${k(WARN_CHARS)} ตัวอักษร ลองย่อไฟล์ตัวตนหรือสไตล์พิมพ์ ตอบจะเร็วขึ้น</p>` : ""}
         </section>

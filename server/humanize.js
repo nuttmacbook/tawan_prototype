@@ -9,6 +9,8 @@ const DEFAULTS = {
     dropQuestion: 0.3,    // chance to drop a trailing "?"
     typo: 0.04,           // chance of a typo followed by a "*fix" bubble
     rethink: false,       // a message arriving before her first bubble shows: drop the reply and think again (one more brain call)
+    typoUnsend: 0.5,      // share of typos fixed by unsending the bubble and sending it again, instead of "*fix"
+    hesitate: 0.08,       // chance she starts typing, stops, and starts again before her first bubble
 };
 
 const LABELS = {
@@ -19,6 +21,8 @@ const LABELS = {
     dropQuestion: "ตัดเครื่องหมายคำถามท้าย",
     typo: "พิมพ์ผิดแล้วแก้",
     rethink: "คิดใหม่เมื่อถูกพิมพ์แทรก",
+    typoUnsend: "พิมพ์ผิดแล้วยกเลิกส่ง",
+    hesitate: "พิมพ์แล้วลบ",
 };
 
 /**
@@ -76,8 +80,22 @@ function makeTypo(text) {
  * @param {{ allowTypo?: boolean }} [options] turn typos off for serious moments
  * @returns {string[]}
  */
-export function humanize(bubbles, style, { allowTypo = true } = {}) {
+export function humanize(bubbles, style, options = {}) {
+    return humanizeReply(bubbles, style, options).bubbles;
+}
+
+/**
+ * humanize() plus the little things a person does while sending:
+ * unsend: indexes of bubbles she sends and then takes back (a typo she resends correctly)
+ * hesitate: she starts typing, stops, and starts again before the first bubble
+ * @param {string[]} bubbles
+ * @param {string} style contents of style.md
+ * @param {{ allowTypo?: boolean }} [options] off for serious moments: no typos, no hesitation games
+ * @returns {{ bubbles: string[], unsend: number[], hesitate: boolean }}
+ */
+export function humanizeReply(bubbles, style, { allowTypo = true } = {}) {
     const s = styleSettings(style);
+    const unsend = [];
     let out = (Array.isArray(bubbles) ? bubbles : []).map((b) => {
         let t = String(b ?? "").trim();
         // Not the silk kind: ผ้าไหม, เส้นไหม, หนอนไหม are words, not the question particle
@@ -97,10 +115,17 @@ export function humanize(bubbles, style, { allowTypo = true } = {}) {
         const i = Math.floor(Math.random() * out.length);
         if (!/\d/.test(out[i])) {
             const typo = makeTypo(out[i]);
-            if (typo) out = [ ...out.slice(0, i), ...typo, ...out.slice(i + 1) ];
+            if (typo && Math.random() < s.typoUnsend) {
+                // Sent with the typo, taken back, then sent again correctly
+                out = [ ...out.slice(0, i), typo[0], out[i], ...out.slice(i + 1) ];
+                unsend.push(i);
+            } else if (typo) {
+                out = [ ...out.slice(0, i), ...typo, ...out.slice(i + 1) ];
+            }
         }
     }
-    return out;
+    const hesitate = allowTypo && out.length > 0 && Math.random() < s.hesitate;
+    return { bubbles: out, unsend, hesitate };
 }
 
 /* ------------------------------------ mirroring and repetition */
