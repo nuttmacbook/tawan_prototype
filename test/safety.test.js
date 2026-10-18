@@ -143,3 +143,93 @@ test("unsend: finds a message logged yesterday (answered after midnight)", async
     await writeFile(path.join(store.historyDir(), `${yesterday}.md`), "# x\n\n[23:59] **ผู้ใช้**: ฝันดี\n");
     assert.equal(await store.unsendFromHistory("ฝันดี", "23:59"), true);
 });
+
+/* ------------------------------------ reactions */
+
+test("reactions: saved in the day's log and read back on the right bubble", async () => {
+    const day = new Date().toLocaleDateString("sv-SE");
+    await writeFile(path.join(store.historyDir(), `${day}.md`), "# x\n\n[10:00] **ผู้ใช้**: ไปไหนมา\n\n[10:01] *ตะวัน*: ตลาดมา / ซื้อขนมด้วย\n\n");
+    // The page showed her bubble a minute after the logged time
+    assert.equal(await store.logReaction({ by: "user", name: "ผู้ใช้", emoji: "😂", targetTime: "10:02", targetText: "ซื้อขนมด้วย" }), true);
+    assert.equal(await store.logReaction({ by: "user", name: "ผู้ใช้", emoji: "❤️", targetTime: "10:02", targetText: "ซื้อขนมด้วย" }), true);
+    assert.equal(await store.logReaction({ by: "agent", name: "ตะวัน", emoji: "👍", targetTime: "10:00", targetText: "ไปไหนมา" }), true);
+    assert.equal(await store.logReaction({ by: "user", name: "ผู้ใช้", emoji: "😮", targetTime: "10:01", targetText: "ไม่มีข้อความนี้" }), false);
+
+    const entries = await store.todayEntries();
+    assert.deepEqual(entries.map((e) => e.reactions), [ [ "👍" ], [ "", "❤️" ] ]);
+    assert.equal(entries.length, 2);
+});
+
+/* ------------------------------------ stopping mid-reply */
+
+test("interrupt: questions and real news stop her, a laugh doesn't", async () => {
+    const { shouldInterrupt } = await import("../src/interrupt.js");
+    for (const t of [ "555", "5555+", "อือ", "โอเค", "😂", "จริงดิ", "ใช่" ]) assert.equal(shouldInterrupt(t), false, t);
+    for (const t of [ "พรุ่งนี้ว่างป่ะ", "กินไรยัง?", "เดี๋ยวนะ", "วันนี้เหนื่อยมาก", "[รูป:abc.jpg]", "[ตอบกลับ \"x\"] อันนี้", "เมื่อกี้เจอแฟนเก่าที่ห้างอ่ะ" ]) {
+        assert.equal(shouldInterrupt(t), true, t);
+    }
+});
+
+test("replaceLoggedLine: a cut reply keeps only what was shown", async () => {
+    const logged = await store.logTurn("agent", "ตะวัน", store.bubblesForLog([ "หนึ่ง", "สอง", "สาม" ]));
+    assert.equal(await store.replaceLoggedLine(logged, logged.line.replace(" / สอง / สาม", "")), true);
+    const last = (await store.todayEntries()).at(-1);
+    assert.equal(last.text, "หนึ่ง");
+    const gone = await store.logTurn("agent", "ตะวัน", "ทั้งหมด");
+    await store.replaceLoggedLine(gone, null);
+    assert.notEqual((await store.todayEntries()).at(-1).text, "ทั้งหมด");
+});
+
+/* ------------------------------------ settings page */
+
+test("config: saved values win over defaults, and are kept in range", async () => {
+    const config = await import("../server/config.js");
+    const saved = await config.setConfig({ idleMinutes: 999, awayPingHours: "0", pushPreview: false, unknown: 5 });
+    assert.equal(saved.idleMinutes, 240);
+    assert.equal(saved.awayPingHours, 0);
+    assert.equal(saved.pushPreview, false);
+    assert.equal("unknown" in saved, false);
+    assert.equal((await config.getConfig()).memoryBudget, 3500);
+});
+
+/* ------------------------------------ memory without duplicates */
+
+test("remember: the same fact again updates it instead of adding a copy", async () => {
+    const memoryFile = profiles.fileOf("memory");
+    await writeFile(memoryFile, "# ความจำ\n\n## ความชอบ\n- [2026-01-01] ชอบกินชาบู\n- [2026-01-01] ชอบชาเขียว\n");
+    assert.match(await store.remember("ความชอบ", "ชอบกินชาบู"), /อัปเดต/);
+    assert.match(await store.remember("ความชอบ", "ชอบกินชาบูร้านใกล้บ้าน"), /อัปเดต/);
+    assert.match(await store.remember("ความชอบ", "ชอบกินชาบู"), /รู้อยู่แล้ว/);
+    assert.match(await store.remember("ความชอบ", "ชอบกินส้มตำ"), /จำแล้ว/);
+    const facts = (await readFile(memoryFile, "utf8")).split("\n").filter((l) => l.startsWith("- "));
+    assert.deepEqual(facts.map((l) => l.replace(/^- \[[\d-]+\] /, "")), [ "ชอบชาเขียว", "ชอบกินชาบูร้านใกล้บ้าน", "ชอบกินส้มตำ" ]);
+});
+
+test("remember: a fact moved to a new topic leaves no empty heading behind", async () => {
+    const memoryFile = profiles.fileOf("memory");
+    await writeFile(memoryFile, "# ความจำ\n\n## ทั่วไป\n- [2026-01-01] ทำงานที่ขอนแก่น\n");
+    await store.remember("งาน", "ทำงานที่ขอนแก่น");
+    const text = await readFile(memoryFile, "utf8");
+    assert.equal(text.includes("## ทั่วไป"), false);
+    assert.match(text, /## งาน\n- \[[\d-]+\] ทำงานที่ขอนแก่น/);
+});
+
+test("remember: saying the opposite replaces the old fact", async () => {
+    const memoryFile = profiles.fileOf("memory");
+    await writeFile(memoryFile, "# ความจำ\n\n## เกี่ยวกับผู้ใช้\n- [2026-01-01] ไม่มีแมว\n");
+    assert.match(await store.remember("เกี่ยวกับผู้ใช้", "มีแมว"), /อัปเดต/);
+    const facts = (await readFile(memoryFile, "utf8")).split("\n").filter((l) => l.startsWith("- "));
+    assert.equal(facts.length, 1);
+    assert.match(facts[0], /\] มีแมว$/);
+});
+
+test("remember: facts about someone else or with other numbers stay separate", async () => {
+    const memoryFile = profiles.fileOf("memory");
+    await writeFile(memoryFile, "# ความจำ\n\n## เกี่ยวกับผู้ใช้\n- [2026-01-01] ชอบแมว\n- [2026-01-01] สอบวันที่ 5\n\n## คนรอบตัว\n- [2026-01-01] แฟนชอบหมา\n");
+    assert.match(await store.remember("คนรอบตัว", "แฟนชอบแมว"), /จำแล้ว/);
+    assert.match(await store.remember("เกี่ยวกับผู้ใช้", "สอบวันที่ 12"), /จำแล้ว/);
+    assert.match(await store.remember("เกี่ยวกับผู้ใช้", "สอบวันที่ 1"), /จำแล้ว/);
+    assert.match(await store.remember("เกี่ยวกับผู้ใช้", "ไม่มีแมวแต่มีหมา"), /จำแล้ว/);
+    const facts = (await readFile(memoryFile, "utf8")).split("\n").filter((l) => l.startsWith("- ")).map((l) => l.replace(/^- \[[\d-]+\] /, ""));
+    for (const f of [ "ชอบแมว", "สอบวันที่ 5", "สอบวันที่ 12", "สอบวันที่ 1", "แฟนชอบหมา", "แฟนชอบแมว", "ไม่มีแมวแต่มีหมา" ]) assert.ok(facts.includes(f), f);
+});

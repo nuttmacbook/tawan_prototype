@@ -49,9 +49,10 @@ const previewOf = (raw) => {
  * Tapping a bubble shows reply and reaction buttons.
  * @param {"user" | "agent"} who
  * @param {string} raw message as stored, may contain [รูป:..] and [ตอบกลับ ".."]
- * @param {{ id?: string, receipt?: string, time?: string, canUnsend?: boolean, isEdited?: boolean }} [options]
+ * @param {{ id?: string, receipt?: string, time?: string, canUnsend?: boolean, isEdited?: boolean, reaction?: string, date?: string }} [options]
+ *   reaction: an emoji already on this bubble (from the saved log) · date: the day of an older message, sent along with a reaction
  */
-const bubble = (who, raw, { id = "", receipt = "", time = "", canUnsend = true, isEdited = false } = {}) => {
+const bubble = (who, raw, { id = "", receipt = "", time = "", canUnsend = true, isEdited = false, reaction = "", date = "" } = {}) => {
     const isUser = who === "user";
     if (String(raw ?? "").trim() === UNSENT) return unsentLine(who, time);
     const msg = parseMessage(raw);
@@ -84,7 +85,7 @@ const bubble = (who, raw, { id = "", receipt = "", time = "", canUnsend = true, 
     }
 
     return /*html*/`
-        <div class="bubble-in group flex flex-col ${isUser ? "items-end" : "items-start"}" ${id ? `data-msg="${id}"` : ""} data-who="${who}" data-raw="${esc(raw)}" data-time="${esc(time)}">
+        <div class="bubble-in group flex flex-col ${isUser ? "items-end" : "items-start"}" ${id ? `data-msg="${id}"` : ""} data-who="${who}" data-raw="${esc(raw)}" data-time="${esc(time)}" ${date ? `data-date="${esc(date)}"` : ""}>
             <div class="flex w-full items-end gap-1.5 ${isUser ? "justify-end" : "justify-start"}">
                 ${isUser ? meta : ""}
                 <div class="flex max-w-[80%] cursor-pointer flex-col gap-1 sm:max-w-[70%] ${isUser ? "items-end" : "items-start"}" onclick="toggleActions(this)">
@@ -93,7 +94,7 @@ const bubble = (who, raw, { id = "", receipt = "", time = "", canUnsend = true, 
                 </div>
                 ${isUser ? "" : meta}
             </div>
-            <span class="-mt-1.5 hidden rounded-full bg-slate-900 px-1.5 py-0.5 text-xs ring-1 ring-white/10 ${isUser ? "mr-12" : "ml-3"}" data-reactions></span>
+            <span class="-mt-1.5 ${reaction ? "" : "hidden"} rounded-full bg-slate-900 px-1.5 py-0.5 text-xs ring-1 ring-white/10 ${isUser ? "mr-12" : "ml-3"}" data-reactions>${esc(reaction)}</span>
             <div class="mt-1 hidden items-center gap-0.5 rounded-full bg-slate-900/95 p-1 ring-1 ring-white/10" data-actions>
                 <button type="button" onclick="startReply(this)" class="rounded-full px-2 py-0.5 text-xs text-slate-300 hover:bg-white/10" aria-label="ตอบกลับ">↩ ตอบกลับ</button>
                 ${isUser && canUnsend && !msg.images.length && !msg.isSticker ? `<button type="button" onclick="startEdit(this)" class="rounded-full px-2 py-0.5 text-xs text-slate-300 hover:bg-white/10" data-edit-btn aria-label="แก้ไข">✎ แก้ไข</button>` : ""}
@@ -253,6 +254,7 @@ const promptMeter = (prompt) => {
             <p class="text-[11px] text-slate-400">
                 ความจำส่ง ${Number(prompt.memory?.kept ?? 0)}/${Number(prompt.memory?.total ?? 0)} เรื่อง · สิ่งที่สอน ${Number(prompt.teachings?.kept ?? 0)}/${Number(prompt.teachings?.total ?? 0)}
             </p>
+            ${u?.ms ? `<p class="text-[11px] text-slate-400">สมองใช้เวลา <span class="font-mono tabular-nums">${(Number(u.ms) / 1000).toFixed(1)}</span> วิ${u.isWarm ? " · ใช้ตัวที่เตรียมไว้ล่วงหน้า" : ""}</p>` : ""}
             ${u ? `<p class="text-[11px] text-slate-400">ใช้จริง: เข้า <span class="font-mono tabular-nums">${k(u.input)}</span> tokens${u.cached ? ` (แคช ${k(u.cached)})` : ""} · ออก <span class="font-mono tabular-nums">${k(u.output)}</span>${u.cost != null ? ` · $${Number(u.cost).toFixed(4)}` : ""}</p>` : ""}
             ${isBig ? `<p class="text-[11px] text-amber-300/90">ใหญ่เกิน ${k(WARN_CHARS)} ตัวอักษร ลองย่อไฟล์ตัวตนหรือสไตล์พิมพ์ ตอบจะเร็วขึ้น</p>` : ""}
         </section>

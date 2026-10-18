@@ -14,7 +14,7 @@ process.on("unhandledRejection", (err) => console.error("unhandled:", err?.stack
 
 const {
     chat, greet, nudge, warmUp, resetSession, personaName, brainMode, consolidateHistory, compactMemory, hasApiKey, presence,
-    addReaction, awayPing, switchExclusive, noteUnsent, promptStats,
+    addReaction, awayPing, switchExclusive, forgetSession, noteUnsent, promptStats, cutLastReply,
 } = await import("./brain.js");
 const profiles = await import("./profiles.js");
 const away = await import("./away.js");
@@ -26,6 +26,8 @@ const logic = await import("./logic.js");
 const store = await import("./store.js");
 const { loadState, describeMood, stageOf, agoText } = await import("./mood.js");
 const { loadThreads } = await import("./life.js");
+const { styleSettings } = await import("./humanize.js");
+const config = await import("./config.js");
 const { claudeCodeStatus, API_MODEL, CC_MODEL } = await import("./llm.js");
 const { isLocal, clientIp, isHttps, lanAddresses, makeHostCheck, isOwnPage } = await import("./gate.js");
 
@@ -103,12 +105,24 @@ const EMPTY_REPLY = { bubbles: [], notes: [] };
 /** Several replies as one, for a request that waited on an answer already being written */
 const mergeReplies = (list) => {
     const done = list.filter(Boolean);
+    // A bubble she takes back is counted from the start of the merged list, not of its own reply
+    const unsend = [];
+    let offset = 0;
+    for (const r of done) {
+        for (const i of r?.unsend ?? []) unsend.push(i + offset);
+        offset += r?.bubbles?.length ?? 0;
+    }
     return {
         ...(done.at(-1) ?? EMPTY_REPLY),
         bubbles: done.flatMap((r) => r?.bubbles ?? []),
         notes: done.flatMap((r) => r?.notes ?? []),
+        unsend,
+        hesitate: done.some((r) => r?.hesitate),
     };
 };
+
+/** The bubbles that stay on screen: a typo she takes back isn't something to put on a lock screen */
+const visibleBubbles = (result) => (result?.bubbles ?? []).filter((_, i) => !(result?.unsend ?? []).includes(i));
 
 /**
  * Answers the given pending messages and only then removes them from the queue,
@@ -152,7 +166,7 @@ async function replyToPending(ids, context = {}) {
             noteUnsent(m.text);
         }
         maybeTidyMemory();
-        if (result?.bubbles?.length && !away.isBeingViewed()) pushMessage(result.bubbles);
+        if (result?.bubbles?.length && !isWatching()) pushMessage(visibleBubbles(result));
         settle.resolve(result);
         return mergeReplies([ ...earlier, result ]);
     } catch (err) {
@@ -169,10 +183,15 @@ async function replyToPending(ids, context = {}) {
     }
 }
 
+/** Someone is looking at this character's chat right now (a reply for another character still gets a push) */
+const isWatching = () => away.isBeingViewed() && profiles.currentId() === profiles.getActiveId();
+
 /** Sends her message to subscribed phones when nobody is looking at the chat */
 async function pushMessage(bubbles) {
     try {
-        await push.notifyAll({ title: await personaName(), body: push.previewText(bubbles) });
+        // A lock screen anyone can glance at: the setting can hide what she wrote
+        const { pushPreview } = await config.getConfig();
+        await push.notifyAll({ title: await personaName(), body: pushPreview ? push.previewText(bubbles) : "ส่งข้อความมา 💬" });
     } catch (err) {
         console.error("push failed:", err?.message ?? err);
     }
@@ -185,7 +204,6 @@ const clockOf = (t) => new Date(t).toLocaleTimeString("en-GB", { hour: "2-digit"
 
 /* ------------------------------------ automatic memory tidy */
 
-const AUTO_TIDY_CHARS = Number(process.env.AUTO_TIDY_CHARS ?? 8000) || 0;
 let isTidying = false;
 
 /**
@@ -193,6 +211,7 @@ let isTidying = false;
  * with a snapshot first so nothing is ever lost for good.
  */
 async function maybeTidyMemory() {
+    const { autoTidyChars: AUTO_TIDY_CHARS } = await config.getConfig();
     if (!AUTO_TIDY_CHARS || isTidying) return;
     // Set before the first await, so two replies finishing together can't both start a tidy-up
     isTidying = true;
@@ -229,7 +248,9 @@ const routes = {
         status: await statusPayload(),
         history: await store.todayEntries(),
         pending: await store.loadPending(),
-        idleMinutes: Number(process.env.IDLE_MINUTES ?? 15),
+        idleMinutes: (await config.getConfig()).idleMinutes,
+        pushPreview: (await config.getConfig()).pushPreview,
+        rethinkOnInterrupt: styleSettings((await store.loadTexts()).style).rethink,
         lastAgentAt: presence().lastAgentAt,
         isLocal: isLocal(req),
         lan: isLocal(req) ? await remoteInfo() : null,
@@ -252,7 +273,16 @@ const routes = {
 
     /* ---------- push notifications */
 
-    "GET /api/push/key": async () => ({ key: await push.publicKey(), count: await push.subscriptionCount() }),
+    "GET /api/push/key": async () => ({
+        key: await push.publicKey(),
+        count: await push.subscriptionCount(),
+        preview: (await config.getConfig()).pushPreview,
+    }),
+
+    /* ---------- app settings (were only in .env) */
+
+    "GET /api/config": async () => ({ values: await config.getConfig(), fields: config.describeConfig() }),
+    "POST /api/config": async (body) => ({ values: await config.setConfig(body?.values ?? {}), fields: config.describeConfig() }),
 
     "POST /api/push/subscribe": async (body) => ({ count: await push.subscribe(body?.subscription, body?.label) }),
 
@@ -269,7 +299,7 @@ const routes = {
 
     "POST /api/profiles/import": async (body) => {
         const { id, name } = await portable.importProfile(body?.pack);
-        await switchExclusive(() => profiles.switchProfile(id));
+        await switchExclusive(() => profiles.switchProfile(id), { reset: true });
         clearActivity();
         return { id, name };
     },
@@ -283,7 +313,7 @@ const routes = {
 
     "POST /api/profiles/create": async (body) => {
         const id = await profiles.createProfile({ name: body?.name, copyFrom: body?.copy ? profiles.getActiveId() : "" });
-        await switchExclusive(() => profiles.switchProfile(id));
+        await switchExclusive(() => profiles.switchProfile(id), { reset: true });
         clearActivity();
         return { id };
     },
@@ -297,6 +327,8 @@ const routes = {
 
     "POST /api/profiles/delete": async (body) => {
         await profiles.deleteProfile(body?.id);
+        // A new character could get this id one day; she must not inherit anything from this one
+        forgetSession(String(body?.id ?? ""));
         return { profiles: await profiles.listProfiles() };
     },
 
@@ -310,15 +342,25 @@ const routes = {
     },
 
     "POST /api/snapshots/restore": async (body) => {
-        await switchExclusive(() => profiles.restoreSnapshot(body?.id));
+        // Her files were just replaced, so her short-term memory of the last minutes goes too
+        await switchExclusive(() => profiles.restoreSnapshot(body?.id), { reset: true });
         return { snapshots: await profiles.listSnapshots() };
     },
 
     /* ---------- chat extras */
 
+    // She notices the reaction next turn, and it is saved in the day's log so it's still there after a refresh
     "POST /api/react": async (body) => {
-        addReaction(body?.emoji, body?.text);
-        return { ok: true };
+        addReaction(body?.emoji, String(body?.text ?? "").replace(/\[รูป:[^\]]+\]/g, "📷").trim());
+        const saved = await store.logReaction({
+            by: "user",
+            name: "ผู้ใช้",
+            emoji: body?.emoji,
+            targetTime: body?.time,
+            targetText: body?.text,
+            date: body?.date,
+        });
+        return { ok: true, saved };
     },
 
     "GET /api/search": async (_, url) => ({ results: await store.searchHistory(url.searchParams.get("q")) }),
@@ -378,6 +420,9 @@ const routes = {
         const context = { activity: String(body?.activity ?? ""), readAgoMs: Number(body?.readAgoMs ?? 0), waitedMs: Number(body?.waitedMs ?? 0) };
         return { ...(await replyToPending(body?.ids, context)), status: await statusPayload() };
     },
+
+    // She stopped typing because you sent something: keep only the bubbles that appeared on screen
+    "POST /api/cut": async (body) => ({ ok: await cutLastReply(body?.shown, body?.bubbles) }),
 
     "POST /api/pacing": async (body) => planReply({ texts: Array.isArray(body?.texts) ? body.texts : [], ...presence() }),
 

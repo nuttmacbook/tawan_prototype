@@ -33,6 +33,7 @@
 | ตัวละครทักมาตอนปิดแชท, ตอบข้อความที่ค้างตอนปิดแชท, แท็บ/เครื่องที่ใช้งานอยู่ | `server/away.js` | ค่าคงที่ด้านบน, `answerWhileClosed()`, `startAwayScheduler()` |
 | ข้อความที่ส่งแล้วแต่เธอยังไม่ตอบ (กันหายตอนรีเฟรช) | `server/store.js` + `server/index.js` | `addPending()`, `replyToPending()`, route `/api/send` |
 | รูป, สติกเกอร์, ตอบกลับ, รีแอคชัน (ฝั่งสมอง) | `server/brain.js` | `<chat_features>` ใน `stablePrompt`, `turn()`, `addReaction()` |
+| เก็บรีแอคชันในประวัติแชท (บรรทัด "รีแอค … โดย … ที่ข้อความ …" ใน log ของวันนั้น) | `server/store.js` | `logReaction()`, `parseEntries()` (คืน `reactions` ต่อ bubble) |
 | รูป, สติกเกอร์, ตอบกลับ, รีแอคชัน (ฝั่งหน้าเว็บ) | `src/components/chat.js` | `bubble()`, `parseMessage()`, `STICKERS`, `REACTIONS` |
 | ค้นหา, ดูรูปเต็ม, "เปิดอยู่ที่อื่น" | `src/components/overlays.js` | |
 | เข้าจากเครื่องอื่น (LAN, Cloudflare Tunnel), รหัสเข้า, กันเดารหัส | `server/index.js` + `server/gate.js` | `accessGate()`, `isLocal()`, `LOCAL_ONLY` — ห้ามทำให้คำขอผ่าน tunnel ถูกนับเป็น local |
@@ -57,7 +58,13 @@
 | อ่าน/เขียนไฟล์ .md | `server/store.js` | |
 | เรียก Claude ในเครื่อง / API | `server/llm.js` | |
 | API ของหน้าเว็บ | `server/index.js` | `routes` |
-| จังหวะฝั่งหน้าเว็บ: รวมข้อความที่พิมพ์ต่อกัน, รอผู้ใช้พิมพ์เสร็จ, อ่านแล้ว/ส่งแล้ว, ทักเมื่อเงียบ | `src/main.js` | ส่วน `engine`: `schedule()`, `reply()`, `armIdle()` |
+| จังหวะฝั่งหน้าเว็บ: รวมข้อความที่พิมพ์ต่อกัน, รอผู้ใช้พิมพ์เสร็จ, อ่านแล้ว/ส่งแล้ว, ทักเมื่อเงียบ, พิมพ์แล้วลบ, ยกเลิกข้อความตัวเอง, ออฟไลน์ตอนวางมือถือ | `src/engine.js` (test: `test/engine.test.js`) · หน้าเว็บส่ง `ui` ให้จาก `src/main.js` | `schedule()`, `reply()`, `speak()`, `armIdle()`, `glance()` · engine ห้ามแตะ DOM เอง ให้เรียกผ่าน `ui` |
+| ค่าตั้งค่าแอปที่แก้ในหน้าเว็บได้ (เดิมอยู่ใน .env) | `server/config.js` + การ์ดใน `src/components/teach.js` | `FIELDS` (เพิ่มค่าใหม่ที่นี่ที่เดียว ฟอร์มสร้างเอง), `getConfig()` |
+| ความจำระยะสั้นแยกต่อตัวละคร, ตัวที่ไม่ได้เปิดตอบเอง | `server/brain.js` + `server/away.js` | `session()` / `me.*`, `everyCharacter()` |
+| กันจดความจำซ้ำ | `server/store.js` + `server/textmatch.js` | `remember()`, `findSameFact()`, `SAME_FACT` |
+| เปิด claude รอไว้ล่วงหน้า, system prompt คงที่ | `server/llm.js` + `server/brain.js` | `prepareSpare()`, `askClaudeCode({ keepWarm })`, `claudeCodeTurn()` (ส่วนที่เปลี่ยนทุกรอบอยู่ใน `<context>` ของข้อความ ไม่ใช่ system prompt) |
+| ข้อความแบบไหนทำให้เธอหยุดพิมพ์ | `src/interrupt.js` | `shouldInterrupt()` |
+| หยุดพิมพ์กลางคัน: ตัดคำตอบให้เหลือเฉพาะที่โผล่, ร่างที่ยังไม่ได้ส่ง | `src/engine.js` (`speak()`, `cutReply()`) + `server/brain.js` | `cutLastReply()`, `takeDraftNote()`, route `/api/cut` |
 | หน้าตาแชท / สถานะ | `src/components/chat.js` | |
 | หน้าตาแถบสอน | `src/components/teach.js` | |
 | หน้าตาโหมด editlogic | `src/components/logic.js` | |

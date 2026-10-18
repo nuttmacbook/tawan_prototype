@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile, readdir, rename, copyFile } from "node:fs/p
 import path from "node:path";
 import { DATA_DIR, activeDir, fileOf, loadSettings, saveSettings } from "./profiles.js";
 import { withFileLock, writeAtomic, updateText } from "./fsutil.js";
+import { normalize, similarity } from "./textmatch.js";
 
 // Paths follow whichever character is active, so switching characters needs no restart
 const FILES = new Proxy({}, { get: (_, name) => fileOf(String(name)) });
@@ -82,8 +83,81 @@ export async function remember(topic, fact) {
     const cleanFact = String(fact ?? "").replace(/[\r\n]+/g, " ").trim();
     if (!cleanFact) return "ไม่มีข้อมูลให้จำ";
 
-    await appendToSection(FILES.memory, cleanTopic, `- [${today()}] ${cleanFact}`);
-    return `จำแล้ว (${cleanTopic}): ${cleanFact}`;
+    let outcome = "new";
+    await updateText(FILES.memory, (text) => {
+        const lines = text.split("\n");
+        const match = findSameFact(lines, cleanFact, cleanTopic);
+        outcome = match.kind;
+        if (match.kind === "known") return null;
+        // The newer wording wins: it's either more detailed or the same fact said again with today's date
+        const kept = lines.filter((_, i) => !match.indexes.includes(i));
+        const doc = splitSections(kept.join("\n"));
+        const line = `- [${today()}] ${cleanFact}`;
+        const index = doc.sections.findIndex((x) => sectionTitle(x) === cleanTopic);
+        if (index >= 0) doc.sections[index] = `${doc.sections[index].trimEnd()}\n${line}`;
+        else doc.sections.push(`## ${cleanTopic}\n${line}`);
+        // A topic left with no facts after the move goes away
+        doc.sections = doc.sections.filter((x) => x.split("\n").slice(1).some((l) => l.trim()));
+        return joinSections(doc);
+    });
+    if (outcome === "known") return `รู้อยู่แล้ว: ${cleanFact}`;
+    return `${outcome === "replace" ? "อัปเดตความจำ" : "จำแล้ว"} (${cleanTopic}): ${cleanFact}`;
+}
+
+const isNegative = (text) => /ไม่|เลิก|ห้าม|ยังไม่/.test(String(text ?? ""));
+
+// Close enough to be the same fact in other words; kept high so two different likes stay two lines
+const SAME_FACT = 0.85;
+
+// Containment only counts when the shorter text is most of the longer one:
+// "ชอบแมว" inside "แฟนชอบแมว" is about someone else, not the same fact
+const MIN_CONTAINED_SHARE = 0.6;
+
+const digitsOf = (text) => (String(text ?? "").match(/\d+/g) ?? []).join(",");
+
+/** Every number in the shorter text appears whole in the longer one ("วันที่ 1" is not part of "วันที่ 12") */
+const numbersFit = (shorter, longer) => {
+    const have = new Set(String(longer ?? "").match(/\d+/g) ?? []);
+    return (String(shorter ?? "").match(/\d+/g) ?? []).every((n) => have.has(n));
+};
+
+/**
+ * Looks for this fact among the remembered ones, so she doesn't write "ชอบชาบู" five times.
+ * Only the same topic is compared, except a word-for-word repeat, which moves the fact to the new topic.
+ * @returns {{ kind: "new" | "known" | "replace", indexes: number[] }}
+ *   known: an existing line already says all of it · replace: these lines say less or the same, differently
+ */
+function findSameFact(lines, fact, topic) {
+    const plain = normalize(fact);
+    const indexes = [];
+    let section = "";
+    for (const [ i, line ] of lines.entries()) {
+        if (line.startsWith("## ")) section = line.slice(3).trim();
+        if (!line.startsWith("- ")) continue;
+        const old = line.replace(/^- (\[\d{4}-\d{2}-\d{2}\]\s*)?/, "");
+        const oldPlain = normalize(old);
+        if (!oldPlain) continue;
+        if (oldPlain === plain) {
+            indexes.push(i);
+            continue;
+        }
+        if (section !== topic) continue;
+        const [ shorter, longer ] = oldPlain.length < plain.length ? [ oldPlain, plain ] : [ plain, oldPlain ];
+        const [ shortText, longText ] = oldPlain.length < plain.length ? [ old, fact ] : [ fact, old ];
+        // Same start = the same fact told in more detail ("ชอบกินชาบู" → "ชอบกินชาบูร้านใกล้บ้าน");
+        // anywhere else it must be most of the text, so "ชอบแมว" in "แฟนชอบแมว" doesn't count
+        const contains = numbersFit(shortText, longText)
+            && (longer.startsWith(shorter) || (longer.includes(shorter) && Array.from(shorter).length / Array.from(longer).length >= MIN_CONTAINED_SHARE));
+        // "มีแมว" sits inside "ไม่มีแมว", but it's the opposite: the newer one is what's true now
+        if (contains && isNegative(old) !== isNegative(fact)) {
+            indexes.push(i);
+            continue;
+        }
+        if (contains && oldPlain.includes(plain)) return { kind: "known", indexes: [] };
+        // Same wording but different numbers ("สอบวันที่ 5" / "สอบวันที่ 12") are different facts
+        if (contains || (similarity(old, fact) >= SAME_FACT && digitsOf(old) === digitsOf(fact))) indexes.push(i);
+    }
+    return { kind: indexes.length ? "replace" : "new", indexes };
 }
 
 /**
@@ -354,12 +428,39 @@ export async function todayEntries(limit = 120) {
  */
 export async function logTurn(who, name, text, at = Date.now()) {
     await mkdir(historyDir(), { recursive: true });
-    const file = path.join(historyDir(), `${today()}.md`);
+    const date = today();
+    const file = path.join(historyDir(), `${date}.md`);
     const label = who === "user" ? `**${name}**` : `*${name}*`;
     // User messages keep the time they were sent, not the time she got around to reading them
     const time = new Date(at).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
-    const line = `[${time}] ${label}: ${String(text ?? "").replace(/\n+/g, " / ")}\n\n`;
-    await updateText(file, (current) => `${current || `# บทสนทนา ${today()}\n\n`}${line}`);
+    const line = `[${time}] ${label}: ${String(text ?? "").replace(/\n+/g, " / ")}`;
+    await updateText(file, (current) => `${current || `# บทสนทนา ${date}\n\n`}${line}\n\n`);
+    return { date, line };
+}
+
+/**
+ * Rewrites one line logTurn wrote, e.g. when she stopped typing and some bubbles were never sent.
+ * @param {{ date: string, line: string }} logged what logTurn returned
+ * @param {string | null} replacement the new line, or null to remove it
+ * @returns {Promise<boolean>} true when the line was found
+ */
+export async function replaceLoggedLine(logged, replacement) {
+    if (!logged?.date || !logged?.line) return false;
+    let found = false;
+    await updateText(path.join(historyDir(), `${logged.date}.md`), (current) => {
+        const lines = current.split("\n");
+        const index = lines.lastIndexOf(logged.line);
+        if (index < 0) return null;
+        found = true;
+        if (replacement == null) {
+            // Take the blank line after it too, so the log keeps one empty line between entries
+            lines.splice(index, lines[index + 1] === "" ? 2 : 1);
+        } else {
+            lines[index] = replacement;
+        }
+        return lines.join("\n");
+    });
+    return found;
 }
 
 /**
@@ -376,12 +477,97 @@ export const bubblesForLog = (bubbles) =>
 
 const DAY_FILE = /^\d{4}-\d{2}-\d{2}\.md$/;
 
-const parseEntries = (text) =>
-    String(text ?? "")
-        .split("\n")
-        .map((l) => l.match(/^\[(\d{2}:\d{2})\] (\*\*|\*)(.+?)\2: (.*)$/))
-        .filter(Boolean)
-        .map(([ , time, mark, , body ]) => ({ who: mark === "**" ? "user" : "agent", time, text: body }));
+const MESSAGE_LINE = /^\[(\d{2}:\d{2})\] (\*\*|\*)(.+?)\2: (.*)$/;
+// "[07:05] รีแอค ❤️ โดย **ผู้ใช้** ที่ข้อความ [07:04] "ไปไหนมา"": kept in the day's log so a reaction
+// survives a refresh, travels with exports and snapshots, and she reads it as part of the chat
+const REACTION_LINE = /^\[(\d{2}:\d{2})\] รีแอค (\S+) โดย (\*\*|\*)(.+?)\3 ที่ข้อความ \[(\d{2}:\d{2})\] "(.*)"$/;
+
+/** The bubbles a log entry is drawn as: her lines hold several bubbles split by " / ", yours are one */
+const bubblesOf = (entry) => (entry.who === "agent" ? String(entry.text).split(" / ") : [ entry.text ]);
+
+/**
+ * Chat entries from a day's log, each with the reactions on it:
+ * `reactions[i]` is the emoji on bubble i (latest reaction wins).
+ */
+const parseEntries = (text) => {
+    const entries = [];
+    for (const line of String(text ?? "").split("\n")) {
+        const m = line.match(MESSAGE_LINE);
+        if (m) {
+            entries.push({ who: m[2] === "**" ? "user" : "agent", time: m[1], text: m[4], reactions: [] });
+            continue;
+        }
+        const r = line.match(REACTION_LINE);
+        if (!r) continue;
+        // A reaction by the user lands on her message, and hers on the user's
+        const targetWho = r[3] === "**" ? "agent" : "user";
+        for (let i = entries.length - 1; i >= 0; i--) {
+            const e = entries[i];
+            if (e.who !== targetWho || e.time !== r[5]) continue;
+            const index = bubblesOf(e).indexOf(r[6]);
+            if (index < 0) continue;
+            e.reactions[index] = r[2];
+            break;
+        }
+    }
+    // No holes: bubbles without a reaction get "" so the list reads the same in JSON and in code
+    return entries.map((e) => ({ ...e, reactions: Array.from(e.reactions, (x) => x ?? "") }));
+};
+
+/** How one bubble is written in the log, so a reaction can find it again */
+const logTextOf = (who, text) =>
+    who === "agent"
+        ? bubblesForLog([ text ])
+        : String(text ?? "").replace(/\n+/g, " / ");
+
+/**
+ * Saves a reaction into the log of the day its message is in.
+ * @param {{ by: "user" | "agent", name: string, emoji: string, targetTime: string, targetText: string, date?: string }} reaction
+ *   date: the day of the message; without it, today and then yesterday are tried
+ * @returns {Promise<boolean>} false when the message isn't in any log (nothing is saved then)
+ */
+export async function logReaction({ by, name, emoji, targetTime, targetText, date = "" }) {
+    const e = String(emoji ?? "").trim().replace(/\s+/g, "").slice(0, 8);
+    const time = String(targetTime ?? "");
+    if (!e || !/^\d{2}:\d{2}$/.test(time)) return false;
+    const targetWho = by === "user" ? "agent" : "user";
+    const text = logTextOf(targetWho, targetText).trim();
+    if (!text) return false;
+
+    const yesterday = new Date(Date.now() - 86400000).toLocaleDateString("sv-SE");
+    const days = /^\d{4}-\d{2}-\d{2}$/.test(String(date)) ? [ date ] : [ today(), yesterday ];
+    const label = by === "user" ? `**${name}**` : `*${String(name).replace(/\*/g, "")}*`;
+
+    for (const day of days) {
+        // Older days may already be archived
+        for (const file of [ path.join(historyDir(), `${day}.md`), path.join(archiveDir(), `${day}.md`) ]) {
+            let saved = false;
+            await updateText(file, (current) => {
+                const target = findTarget(parseEntries(current), targetWho, time, text);
+                if (!target) return null;
+                saved = true;
+                // The log's own time for that message, so reading it back is an exact match
+                return `${current.trimEnd()}\n\n[${clock()}] รีแอค ${e} โดย ${label} ที่ข้อความ [${target.time}] "${text}"\n\n`;
+            });
+            if (saved) return true;
+        }
+    }
+    return false;
+}
+
+const minutesOf = (hhmm) => Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3, 5));
+const NEAR_MINUTES = 10;
+
+/**
+ * The message a reaction is for. The page shows her bubbles at the time they appeared,
+ * which can be a minute or two after the time in the log, so a close time with the same text counts.
+ */
+function findTarget(entries, who, time, text) {
+    const same = entries.filter((x) => x.who === who && bubblesOf(x).includes(text));
+    return same.findLast((x) => x.time === time)
+        ?? same.findLast((x) => Math.abs(minutesOf(x.time) - minutesOf(time)) <= NEAR_MINUTES)
+        ?? null;
+}
 
 /**
  * The closest day before `before` that has messages, from today's folder or the archive.
