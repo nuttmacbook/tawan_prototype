@@ -8,7 +8,7 @@ import { loadState, passTime, markUserMessage, gapSinceUser, adjustMood, describ
 import { currentId } from "./profiles.js";
 import { loadThreads, addThread, closeThread, writeDiary, loadDiary } from "./life.js";
 import { askApi, askClaudeCode, hasApiKey, usageOf, claudeCodeUsage } from "./llm.js";
-import { humanize, userStyleNote, repetitionNote } from "./humanize.js";
+import { humanizeReply, userStyleNote, repetitionNote } from "./humanize.js";
 import { selectMemory, selectTeachings } from "./recall.js";
 import { getConfig } from "./config.js";
 
@@ -87,9 +87,20 @@ export async function brainMode() {
 const DRAFT_TTL_MS = 10 * 60000;
 
 /** Remembers a reply that was just logged, so the page can cut it short */
-function recordReply(bubbles, logged) {
-    me.lastReply = { bubbles: [ ...bubbles ], logged, profileId: currentId(), transcriptIndex: me.transcript.length - 1 };
+function recordReply(result, logged) {
+    me.lastReply = {
+        bubbles: [ ...result.bubbles ],
+        unsend: [ ...(result.unsend ?? []) ],
+        logged,
+        profileId: currentId(),
+        transcriptIndex: me.transcript.length - 1,
+    };
 }
+
+const UNSENT = "[ยกเลิกข้อความ]";
+
+/** Bubbles as the log keeps them: one she took back shows as "ยกเลิกข้อความ", like in the chat */
+const shownInLog = (bubbles, unsend = []) => bubbles.map((b, i) => (unsend.includes(i) ? UNSENT : b));
 
 /**
  * Keeps only the bubbles the page actually showed. The rest becomes a draft she knows she didn't send.
@@ -110,14 +121,16 @@ export const cutLastReply = (shown, expected) =>
         if (n < 0) return false;
         if (n >= reply.bubbles.length) return false;
 
-        const kept = reply.bubbles.slice(0, n);
-        const dropped = reply.bubbles.slice(n);
+        const isKept = (_, i) => i < n && !reply.unsend.includes(i);
+        const kept = reply.bubbles.filter(isKept);
+        const dropped = reply.bubbles.filter((_, i) => i >= n && !reply.unsend.includes(i));
         const turn = me.transcript[reply.transcriptIndex];
         if (turn?.role === "assistant") turn.text = kept.join("\n\n") || "(พิมพ์อยู่แล้วหยุดไป ยังไม่ได้ส่งอะไร)";
 
         const name = await personaName();
-        await replaceLoggedLine(reply.logged, kept.length ? `${reply.logged.line.match(/^\[\d{2}:\d{2}\] /)?.[0] ?? ""}*${name}*: ${bubblesForLog(kept).replace(/\n+/g, " / ")}` : null);
-        me.draft = { text: dropped, at: Date.now(), profileId: reply.profileId };
+        const logged = shownInLog(reply.bubbles.slice(0, n), reply.unsend);
+        await replaceLoggedLine(reply.logged, n ? `${reply.logged.line.match(/^\[\d{2}:\d{2}\] /)?.[0] ?? ""}*${name}*: ${bubblesForLog(logged).replace(/\n+/g, " / ")}` : null);
+        me.draft = dropped.length ? { text: dropped, at: Date.now(), profileId: reply.profileId } : null;
         me.lastReply = null;
         return true;
     });
@@ -604,9 +617,11 @@ async function turn(userText, replyNote = "") {
         if (turnImageNote) me.transcript.at(-1).text = plain.replace("[ผู้ใช้ส่งรูปมา]", `[ผู้ใช้ส่งรูป: ${turnImageNote}]`);
         // No typos when the user seems to be hurting; a "*fix" there would feel careless
         const isSerious = /เศร้า|ร้องไห้|ไม่ไหว|อยากตาย|ไม่อยากอยู่|ทำร้ายตัวเอง|เครียดมาก|ป่วย|โรงพยาบาล/.test(userText);
-        const bubbles = humanize(raw, (await loadTexts()).style, { allowTypo: !isSerious });
-        me.transcript.push({ role: "assistant", text: bubbles.join("\n\n") || (turnReaction ? `(กดรีแอค ${turnReaction})` : "(อ่านแล้วไม่ตอบ)") });
-        return { bubbles, notes, reaction: turnReaction };
+        const { bubbles, unsend, hesitate } = humanizeReply(raw, (await loadTexts()).style, { allowTypo: !isSerious });
+        // What she "said" is what stayed on screen: a bubble she took back isn't part of it
+        const said = bubbles.filter((_, i) => !unsend.includes(i));
+        me.transcript.push({ role: "assistant", text: said.join("\n\n") || (turnReaction ? `(กดรีแอค ${turnReaction})` : "(อ่านแล้วไม่ตอบ)") });
+        return { bubbles, unsend, hesitate, notes, reaction: turnReaction };
     } catch (err) {
         me.transcript.pop();
         throw err;
@@ -684,7 +699,7 @@ export const chat = (texts, { activity = "", readAgoMs = 0, waitedMs = 0 } = {})
         me.lastReply = null;
         if (result.bubbles.length) {
             me.lastAgentAt = Date.now();
-            recordReply(result.bubbles, await logTurn("agent", await personaName(), bubblesForLog(result.bubbles)));
+            recordReply(result, await logTurn("agent", await personaName(), bubblesForLog(shownInLog(result.bubbles, result.unsend))));
         }
         return result;
     });
@@ -721,7 +736,7 @@ export const awayPing = (hours) =>
         if (result.bubbles.length) {
             me.lastAgentAt = Date.now();
             me.lastGreetAt = Date.now();
-            recordReply(result.bubbles, await logTurn("agent", await personaName(), bubblesForLog(result.bubbles)));
+            recordReply(result, await logTurn("agent", await personaName(), bubblesForLog(shownInLog(result.bubbles, result.unsend))));
         }
         return result;
     });
@@ -777,7 +792,7 @@ export const greet = () =>
         me.lastReply = null;
         if (result.bubbles.length) {
             me.lastAgentAt = Date.now();
-            recordReply(result.bubbles, await logTurn("agent", await personaName(), bubblesForLog(result.bubbles)));
+            recordReply(result, await logTurn("agent", await personaName(), bubblesForLog(shownInLog(result.bubbles, result.unsend))));
         }
         return result;
     });
@@ -795,7 +810,7 @@ export const nudge = (minutes) =>
         me.lastReply = null;
         if (result.bubbles.length) {
             me.lastAgentAt = Date.now();
-            recordReply(result.bubbles, await logTurn("agent", await personaName(), bubblesForLog(result.bubbles)));
+            recordReply(result, await logTurn("agent", await personaName(), bubblesForLog(shownInLog(result.bubbles, result.unsend))));
         }
         return result;
     });

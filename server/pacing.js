@@ -207,6 +207,8 @@ export async function planReply({ texts = [], lastAgentAt = 0, lastReadAt = 0, n
         readMs: Math.round(readMs),
         laterMs: Math.round(laterMs),
         activity: busy?.name ?? "",
+        // Phone down (shower, market): the page shows her as offline until she's back
+        phoneAway: Boolean(busy?.phoneAway),
         thinkMs: Math.round(clamp(jitter(thinkMs), 300, 8000)),
         typingCps: Math.round(clamp(jitter(typingCps), 2.5, 14) * 10) / 10,
         pauseMs: PACING.pauseBetweenMs,

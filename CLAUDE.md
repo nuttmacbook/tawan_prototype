@@ -58,9 +58,13 @@
 | อ่าน/เขียนไฟล์ .md | `server/store.js` | |
 | เรียก Claude ในเครื่อง / API | `server/llm.js` | |
 | API ของหน้าเว็บ | `server/index.js` | `routes` |
-| จังหวะฝั่งหน้าเว็บ: รวมข้อความที่พิมพ์ต่อกัน, รอผู้ใช้พิมพ์เสร็จ, อ่านแล้ว/ส่งแล้ว, ทักเมื่อเงียบ | `src/main.js` | ส่วน `engine`: `schedule()`, `reply()`, `armIdle()`, `glance()` (จังหวะที่ขึ้น "อ่านแล้ว") |
+| จังหวะฝั่งหน้าเว็บ: รวมข้อความที่พิมพ์ต่อกัน, รอผู้ใช้พิมพ์เสร็จ, อ่านแล้ว/ส่งแล้ว, ทักเมื่อเงียบ, พิมพ์แล้วลบ, ยกเลิกข้อความตัวเอง, ออฟไลน์ตอนวางมือถือ | `src/engine.js` (test: `test/engine.test.js`) · หน้าเว็บส่ง `ui` ให้จาก `src/main.js` | `schedule()`, `reply()`, `speak()`, `armIdle()`, `glance()` · engine ห้ามแตะ DOM เอง ให้เรียกผ่าน `ui` |
+| ค่าตั้งค่าแอปที่แก้ในหน้าเว็บได้ (เดิมอยู่ใน .env) | `server/config.js` + การ์ดใน `src/components/teach.js` | `FIELDS` (เพิ่มค่าใหม่ที่นี่ที่เดียว ฟอร์มสร้างเอง), `getConfig()` |
+| ความจำระยะสั้นแยกต่อตัวละคร, ตัวที่ไม่ได้เปิดตอบเอง | `server/brain.js` + `server/away.js` | `session()` / `me.*`, `everyCharacter()` |
+| กันจดความจำซ้ำ | `server/store.js` + `server/textmatch.js` | `remember()`, `findSameFact()`, `SAME_FACT` |
+| เปิด claude รอไว้ล่วงหน้า, system prompt คงที่ | `server/llm.js` + `server/brain.js` | `prepareSpare()`, `askClaudeCode({ keepWarm })`, `claudeCodeTurn()` (ส่วนที่เปลี่ยนทุกรอบอยู่ใน `<context>` ของข้อความ ไม่ใช่ system prompt) |
 | ข้อความแบบไหนทำให้เธอหยุดพิมพ์ | `src/interrupt.js` | `shouldInterrupt()` |
-| หยุดพิมพ์กลางคัน: ตัดคำตอบให้เหลือเฉพาะที่โผล่, ร่างที่ยังไม่ได้ส่ง | `src/main.js` (`speak()`, `cutReply()`) + `server/brain.js` | `cutLastReply()`, `takeDraftNote()`, route `/api/cut` |
+| หยุดพิมพ์กลางคัน: ตัดคำตอบให้เหลือเฉพาะที่โผล่, ร่างที่ยังไม่ได้ส่ง | `src/engine.js` (`speak()`, `cutReply()`) + `server/brain.js` | `cutLastReply()`, `takeDraftNote()`, route `/api/cut` |
 | หน้าตาแชท / สถานะ | `src/components/chat.js` | |
 | หน้าตาแถบสอน | `src/components/teach.js` | |
 | หน้าตาโหมด editlogic | `src/components/logic.js` | |

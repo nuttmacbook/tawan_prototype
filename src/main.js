@@ -6,15 +6,11 @@ import { teachPanel, lessonList, snapshotList, configFields, FILES } from "./com
 import { overlays, searchResults } from "./components/overlays.js";
 import { logicPanel, logicEvent, backupList, logicWorking } from "./components/logic.js";
 import { esc } from "./components/ui.js";
-import { shouldInterrupt } from "./interrupt.js";
+import { createEngine } from "./engine.js";
 
 /* ------------------------------------ state */
 
-const MAX_NUDGES = 2;
-const USER_TYPING_GRACE_MS = 2500;   // she waits this long after your last keystroke before replying
-const MAX_WAIT_FOR_USER_MS = 30000;
 const IN_CHAT_MS = 120000;           // matches PACING.inChatWindowMs on the server
-const FALLBACK_PLAN = { readMs: 1500, laterMs: 0, activity: "", thinkMs: 800, typingCps: 6, pauseMs: [ 400, 1200 ], reasons: [ "ไม่ได้แผนจากเซิร์ฟเวอร์" ] };
 
 const state = {
     name: "",
@@ -52,46 +48,6 @@ const state = {
     pushPreview: true,
 };
 
-/** The conversation engine: what you've sent, what she's read, and whether she's busy replying */
-const engine = {
-    pending: [],
-    isScheduling: false,
-    isReplying: false,
-    readTimer: null,
-    userTypingUntil: 0,
-    isAway: false,
-    skip: false,
-    seq: 0,
-    // Set when you send something worth stopping for while she's typing (see src/interrupt.js)
-    isInterrupted: false,
-    // The last reply was dropped to think again; the next one is shown whatever happens
-    hasRethought: false,
-};
-
-/** She looks at the chat: everything you've sent so far shows "อ่านแล้ว" */
-function glance() {
-    const unread = engine.pending.filter((m) => !m.isRead);
-    if (!unread.length) return;
-    unread.forEach((m) => {
-        m.isRead = true;
-    });
-    setReceipts(unread.map((m) => m.id), "อ่านแล้ว");
-    api.read(unread.map((m) => m.id)).catch(() => {});
-}
-
-/**
- * She stopped typing to read your message, so the bubbles she never sent are taken back on the server too:
- * out of the log and her short-term memory, and kept as a draft she can pick up next turn.
- */
-async function cutReply(result, shown) {
-    const bubbles = Array.isArray(result?.bubbles) ? result.bubbles : [];
-    if (shown >= bubbles.length) return;
-    append(stateNote(shown ? `✋ หยุดพิมพ์เพื่ออ่านข้อความใหม่ · ไม่ได้ส่งอีก ${bubbles.length - shown} ข้อความ` : "✋ ถูกพิมพ์แทรกก่อนส่ง · คิดคำตอบใหม่"));
-    try {
-        await api.cut(shown, bubbles);
-    } catch {}
-}
-
 /** Browser storage can be blocked; preferences just fall back to defaults then */
 function readPref(key, fallback) {
     try {
@@ -110,7 +66,6 @@ function writePref(key, value) {
 
 const $ = (sel) => document.querySelector(sel);
 const sleep = (ms) => new Promise((r) => setTimeout(r, Math.max(0, ms)));
-const between = ([ lo, hi ] = [ 400, 1200 ]) => lo + Math.random() * (hi - lo);
 
 /* ------------------------------------ render */
 
@@ -171,7 +126,8 @@ function setPresence(mode) {
         text = "กำลังพิมพ์...";
     } else if (mode !== "online") {
         const away = Date.now() - state.lastSeenAgentAt;
-        isOnline = state.lastSeenAgentAt > 0 && away < IN_CHAT_MS;
+        // In the shower or asleep, she isn't on her phone even if she wrote a minute ago
+        isOnline = state.lastSeenAgentAt > 0 && away < IN_CHAT_MS && !engine.isOffline();
         const min = Math.round(away / 60000);
         if (!isOnline) text = state.lastSeenAgentAt ? `ใช้งานเมื่อ ${min < 60 ? `${Math.max(1, min)} นาที` : `${Math.round(min / 60)} ชั่วโมง`}ที่แล้ว` : "ออฟไลน์";
     }
@@ -212,7 +168,7 @@ function setTyping(isOn) {
         scrollDown();
         setPresence("typing");
     } else {
-        setPresence(engine.isReplying ? "online" : undefined);
+        setPresence(engine.state.isReplying ? "online" : undefined);
     }
 }
 
@@ -225,14 +181,6 @@ function setReceipts(ids, text) {
 }
 
 const clock = () => new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
-
-/** Waits like sleep(), but the debug "⏩ ข้าม" button can cut it short */
-async function waitSkippable(ms) {
-    engine.skip = false;
-    const end = Date.now() + Math.max(0, ms);
-    while (Date.now() < end && !engine.skip) await sleep(250);
-    engine.skip = false;
-}
 
 /**
  * A failed send means the message never reached the server; a failed reply means it's saved
@@ -250,221 +198,53 @@ function markFailed(batch, err, { isSendFailure = false } = {}) {
     append(errorLine(err?.message ?? String(err)));
 }
 
-/**
- * Shows her reply one bubble at a time. Typing time follows the plan's speed;
- * time already spent waiting for the server counts as typing for the first bubble.
- * Between bubbles she glances at the chat: if you've sent something worth stopping for,
- * she doesn't type the rest, looks for a moment, and returns how many bubbles she showed.
- * @returns {Promise<number>} bubbles shown
- */
-async function speak(result, plan, startedAt = Date.now()) {
-    if (state.showNotes) (result?.notes ?? []).forEach((n) => append(note(n)));
-    const bubbles = Array.isArray(result?.bubbles) ? result.bubbles : [];
-    const cps = Number(plan?.typingCps) || 6;
-    const canAnimate = !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-
-    for (const [ i, text ] of bubbles.entries()) {
-        let typingMs = Math.min(9000, Math.max(600, (text.length / cps) * 1000));
-
-        if (i === 0) {
-            typingMs -= Date.now() - startedAt;
-        } else {
-            setTyping(false);
-            glance();
-            if (engine.isInterrupted) {
-                // The dots go away while she reads, like a person who stopped mid-thought
-                await sleep(between([ 900, 2200 ]));
-                if (result?.status) {
-                    state.status = result.status;
-                    renderStatus();
-                }
-                return i;
-            }
-            await sleep(between(plan?.pauseMs));
-            setTyping(true);
-        }
-
-        // Long messages sometimes get a pause mid-typing, the way people stop to think
-        if (canAnimate && typingMs > 2500 && Math.random() < 0.3) {
-            await sleep(typingMs * 0.45);
-            setTyping(false);
-            await sleep(500 + Math.random() * 900);
-            setTyping(true);
-            typingMs *= 0.55;
-        }
-
-        if (canAnimate) await sleep(typingMs);
-        setTyping(false);
-        append(bubble("agent", text, { time: clock() }));
-        notify(text);
-        markSeen();
-        if (i < bubbles.length - 1) setTyping(true);
-    }
-
-    setTyping(false);
-    if (result?.status) {
-        state.status = result.status;
-        renderStatus();
-    }
-    return bubbles.length;
-}
-
 /* ------------------------------------ engine */
 
-async function getPlan(texts) {
-    try {
-        return await api.pacing(texts);
-    } catch {
-        return FALLBACK_PLAN;
-    }
-}
-
-/**
- * Starts the "she'll see it in a moment" wait. Messages sent before she reads
- * just join the same batch, so a burst of messages gets one reply.
- */
-async function schedule() {
-    if (engine.isReplying || engine.readTimer || engine.isScheduling || !engine.pending.length) return;
-    engine.isScheduling = true;
-    let plan = await getPlan(engine.pending.map((m) => m.text));
-    engine.isScheduling = false;
-    if (engine.isReplying || engine.readTimer) return;
-
-    // She already saw these while typing; if she now steps away it's "read, reply later", not unread
-    if (plan.activity && !(plan.laterMs > 0) && engine.pending.every((m) => m.isRead)) {
-        plan = { ...plan, laterMs: plan.readMs, readMs: 300 };
-    }
-
-    append(pacingNote(plan));
-    engine.readTimer = true;
-    await waitSkippable(plan.readMs);
-    engine.readTimer = null;
-    reply(plan);
-}
-
-/**
- * She opens the chat. Depending on the plan she replies now, reads and comes back later,
- * or (her choice, via the brain) reads and doesn't reply at all.
- */
-async function reply(plan) {
-    engine.isReplying = true;
-    clearTimeout(idleTimer);
-
-    const firstSentAt = Math.min(...engine.pending.map((m) => m.sentAt));
-    glance();
-    const readAt = Date.now();
-    markSeen();
-    setPresence("online");
-
-    // Read it, but busy: she puts the phone down and answers when she's free
-    if (Number(plan?.laterMs) > 0) {
-        engine.isAway = true;
-        append(stateNote(`👀 อ่านแล้วแต่${plan.activity || "ยังไม่ว่าง"} · จะกลับมาตอบใน ~${(plan.laterMs / 60000).toFixed(1)} นาที`, { canSkip: true }));
-        await waitSkippable(plan.laterMs);
-        engine.isAway = false;
-        markSeen();
-        glance();
-    }
-
-    // If you're still typing she waits for you to finish, reading as you go
-    const waitUntil = Date.now() + MAX_WAIT_FOR_USER_MS;
-    while (Date.now() < engine.userTypingUntil && Date.now() < waitUntil) {
-        await sleep(400);
-        glance();
-    }
-
-    glance();
-    const batch = engine.pending.splice(0);
-    // Only what you send from here on can make her stop typing; this batch is what she's answering
-    engine.isInterrupted = false;
-    if (!batch.length) {
-        engine.isReplying = false;
-        return;
-    }
-
-    await sleep(plan.thinkMs);
-    setTyping(true);
-    const startedAt = Date.now();
-
-    try {
-        const result = await api.chat(batch.map((m) => m.id), {
-            clientId: state.clientId,
-            activity: plan.activity,
-            readAgoMs: Number(plan?.laterMs) > 0 ? Date.now() - readAt : 0,
-            waitedMs: Date.now() - firstSentAt,
-        });
-        // Her reaction lands on the last message of the batch, like a long-press heart
-        if (result?.reaction) showReaction(batch.at(-1)?.id, result.reaction);
-        if (!result?.bubbles?.length) append(stateNote(result?.reaction ? `${result.reaction} กดรีแอคแทนการตอบ` : "🙊 อ่านแล้วไม่ตอบ"));
-
-        // Optional (style.md "คิดใหม่เมื่อถูกพิมพ์แทรก"): you wrote something important before her first bubble
-        // appeared, so she drops this answer and replies to everything together. Costs one more brain call.
-        // Once in a row at most: a stream of messages shouldn't throw away reply after reply
-        if (engine.isInterrupted && state.rethinkOnInterrupt && !engine.hasRethought && result?.bubbles?.length) {
-            engine.hasRethought = true;
-            setTyping(false);
-            glance();
-            await cutReply(result, 0);
-            if (result?.status) {
-                state.status = result.status;
-                renderStatus();
-            }
-            return;
-        }
-        engine.hasRethought = false;
-        await cutReply(result, await speak(result, plan, startedAt));
-    } catch (err) {
-        setTyping(false);
-        markFailed(batch, err);
-    } finally {
-        engine.isReplying = false;
-        engine.isInterrupted = false;
-        // She's still in the chat when she finishes, so she sees what you sent meanwhile
-        if (!engine.isAway) glance();
-        setPresence();
-        armIdle();
-        // Anything you sent while she was busy or typing gets its own turn now
-        if (engine.pending.length) schedule();
-    }
-}
-
-/* ------------------------------------ idle nudges */
-
-let idleTimer = null;
-
-function armIdle() {
-    clearTimeout(idleTimer);
-    if (!(state.idleMinutes > 0) || state.nudges >= MAX_NUDGES) return;
-
-    idleTimer = setTimeout(async () => {
-        if (engine.isReplying || engine.readTimer || engine.pending.length) return armIdle();
-        state.nudges++;
-        engine.isReplying = true;
-        try {
-            const plan = await getPlan([]);
-            engine.isInterrupted = false;
-            // You wrote meanwhile: answer that instead of nudging
-            const result = plan.isAsleep || engine.pending.length ? null : await api.nudge(state.idleMinutes * state.nudges);
-            if (result?.bubbles?.length) {
-                setTyping(true);
-                await cutReply(result, await speak(result, plan, Date.now()));
-            }
-        } catch (err) {
-            console.error(err);
-        } finally {
-            engine.isReplying = false;
-            engine.isInterrupted = false;
-            setPresence();
-            armIdle();
-            // A message sent while she was nudging waited for her to finish; answer it now
-            if (engine.pending.length) schedule();
-        }
-    }, state.idleMinutes * 60000);
-}
+// The chat rhythm lives in engine.js; this is everything it needs from the page
+const engine = createEngine({
+    api,
+    settings: () => ({
+        clientId: state.clientId,
+        idleMinutes: state.idleMinutes,
+        rethinkOnInterrupt: state.rethinkOnInterrupt,
+        showNotes: state.showNotes,
+    }),
+    ui: {
+        append: (kind, data, options) => {
+            if (kind === "pacing") append(pacingNote(data));
+            else if (kind === "state") append(stateNote(data, options));
+            else if (kind === "notes") (data ?? []).forEach((n) => append(note(n)));
+            else if (kind === "error") append(errorLine(data));
+        },
+        setTyping,
+        setPresence,
+        setReceipts,
+        showReaction,
+        markFailed,
+        markSeen,
+        notify,
+        isReducedMotion: () => window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+        renderStatus: (status) => {
+            if (!status) return;
+            state.status = status;
+            renderStatus();
+        },
+        /** @returns {string} the row id, so the bubble can be taken back */
+        showBubble: (text) => {
+            const id = `a${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+            append(bubble("agent", text, { id, time: clock() }));
+            return id;
+        },
+        unsendBubble: (id) => {
+            const row = document.querySelector(`[data-msg="${id}"]`);
+            if (row) row.outerHTML = unsentLine("agent", row.dataset.time ?? clock());
+        },
+    },
+});
 
 // Keeps "ใช้งานเมื่อ ... ที่แล้ว" fresh
 setInterval(() => {
-    if (!engine.isReplying && !$("[data-typing]")) setPresence();
+    if (!engine.state.isReplying && !$("[data-typing]")) setPresence();
 }, 30000);
 
 /* ------------------------------------ window handlers: chat */
@@ -509,7 +289,7 @@ if (typeof window !== "undefined") {
     // Typing tells her you're not done yet, so she holds her reply
     window.onChatInput = (el) => {
         window.autoGrow(el);
-        if (el.value.trim()) engine.userTypingUntil = Date.now() + USER_TYPING_GRACE_MS;
+        if (el.value.trim()) engine.userTyping(true);
     };
 
     // Enter sends, Shift+Enter adds a new line; skip while composing Thai with an IME
@@ -529,7 +309,7 @@ if (typeof window !== "undefined") {
 
         input.value = "";
         window.autoGrow(input);
-        engine.userTypingUntil = 0;
+        engine.userTyping(false);
         if (state.editing) saveEdit(state.editing, typed);
         else queueMessage(withReply(typed));
         input.focus();
@@ -565,10 +345,8 @@ function withReply(text) {
 
 /** Shows your message and puts it in line for her to read */
 async function queueMessage(text) {
-    const id = `m${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}${engine.seq++}`;
+    const id = engine.nextId();
     append(bubble("user", text, { id, receipt: "กำลังส่ง", time: clock() }), true);
-    state.nudges = 0;
-    clearTimeout(idleTimer);
 
     // Saved on the server first, so a refresh or closed tab can't lose it
     try {
@@ -580,10 +358,7 @@ async function queueMessage(text) {
 
     // "อ่านแล้ว" comes when she actually looks (between bubbles, or when she's done typing),
     // not the instant it arrives; something important makes her stop typing to look
-    engine.pending.push({ id, text, sentAt: Date.now(), isRead: false });
-    setReceipts([ id ], "ส่งแล้ว");
-    if (engine.isReplying && !engine.isAway && shouldInterrupt(text)) engine.isInterrupted = true;
-    schedule();
+    engine.add({ id, text });
 }
 
 if (typeof window !== "undefined") {
@@ -598,15 +373,12 @@ if (typeof window !== "undefined") {
         } catch (err) {
             return markFailed([ { id, text } ], err, { isSendFailure: true });
         }
-        el.textContent = "ส่งแล้ว";
-        engine.pending.push({ id, text, sentAt: Date.now(), isRead: false });
-        if (engine.isReplying && !engine.isAway && shouldInterrupt(text)) engine.isInterrupted = true;
-        schedule();
+        engine.add({ id, text });
     };
 
     // Debug: stop whatever she's waiting on (reading, busy, coming back later)
     window.skipWait = () => {
-        engine.skip = true;
+        engine.skip();
         api.clearActivity().catch(() => {});
     };
 
@@ -1141,7 +913,8 @@ const updateNotifyButton = renderNotify;
 function notify(text) {
     if (state.pushSub || !canNotify() || Notification.permission !== "granted" || !document.hidden) return;
     try {
-        const n = new Notification(state.name, { body: previewOf(text), tag: "persona-chat" });
+        // Same privacy choice as push notifications on the lock screen
+        const n = new Notification(state.name, { body: state.pushPreview ? previewOf(text) : "ส่งข้อความมา 💬", tag: "persona-chat" });
         n.onclick = () => {
             window.focus();
             n.close();
@@ -1164,7 +937,7 @@ function setElsewhere(isElsewhere) {
     const el = $("[data-elsewhere]");
     el?.classList.toggle("hidden", !isElsewhere);
     el?.classList.toggle("grid", isElsewhere);
-    if (isElsewhere) clearTimeout(idleTimer);
+    if (isElsewhere) engine.stopIdle();
 }
 
 // Tell the server right away when the chat is hidden or closed, so her next message becomes a push
@@ -1207,7 +980,7 @@ if (typeof window !== "undefined") {
             // The idle nudge timer lives in this page, so it picks up the new value right away
             state.idleMinutes = Number(state.config?.values?.idleMinutes ?? state.idleMinutes);
             state.pushPreview = state.config?.values?.pushPreview !== false;
-            armIdle();
+            engine.armIdle();
             if (msg) msg.textContent = "✓ บันทึกแล้ว";
         } catch (err) {
             if (msg) msg.textContent = err.message;
@@ -1541,7 +1314,7 @@ async function saveEdit(id, text) {
     window.cancelEdit();
     try {
         await api.edit(id, text);
-        const item = engine.pending.find((m) => m.id === id);
+        const item = engine.find(id);
         if (item) item.text = text;
         if (row) {
             row.dataset.raw = text;
@@ -1632,7 +1405,7 @@ if (typeof window !== "undefined") {
         window.closePopovers();
         try {
             await api.unsend(id, row.dataset.raw ?? "", row.dataset.time ?? "");
-            engine.pending = engine.pending.filter((m) => m.id !== id);
+            engine.remove(id);
             row.outerHTML = unsentLine("user", row.dataset.time ?? "");
         } catch (err) {
             alert(err.message);
@@ -1675,8 +1448,8 @@ async function boot() {
         for (const m of data?.pending ?? []) {
             const time = new Date(m.sentAt).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
             messagesEl()?.insertAdjacentHTML("beforeend", bubble("user", m.text, { id: m.id, time, receipt: m.readAt ? "อ่านแล้ว" : "ส่งแล้ว", isEdited: Boolean(m.isEdited) }));
-            engine.pending.push({ id: m.id, text: m.text, sentAt: m.sentAt, isRead: Boolean(m.readAt) });
         }
+        engine.restore(data?.pending);
         scrollDown(true);
         setPresence();
 
@@ -1696,29 +1469,11 @@ async function boot() {
     await initPush();
     renderNotify();
 
-    // She notices you opened the chat, then decides whether to say hi
-    engine.isReplying = true;
-    try {
-        // Asleep by her routine in persona.md: no hello, she'll see your messages when she wakes.
-        // With messages still waiting she answers those instead of saying hello.
-        const plan = await getPlan([]);
-        engine.isInterrupted = false;
-        const result = plan.isAsleep || engine.pending.length ? null : await api.greet();
-        if (result?.bubbles?.length) {
-            await sleep(plan.thinkMs);
-            setTyping(true);
-            await cutReply(result, await speak(result, plan, Date.now()));
-        }
-    } catch (err) {
-        setTyping(false);
-        append(errorLine(err.message));
-    } finally {
-        engine.isReplying = false;
-        setPresence();
-        armIdle();
-        if (engine.pending.length) schedule();
-        $("[data-chat-input]")?.focus();
-    }
+    // She notices you opened the chat, then decides whether to say hi.
+    // Asleep by her routine in persona.md: no hello, she'll see your messages when she wakes.
+    // With messages still waiting she answers those instead of saying hello.
+    $("[data-chat-input]")?.focus();
+    await engine.greet();
 }
 
 boot();
