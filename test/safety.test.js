@@ -233,3 +233,9 @@ test("remember: facts about someone else or with other numbers stay separate", a
     const facts = (await readFile(memoryFile, "utf8")).split("\n").filter((l) => l.startsWith("- ")).map((l) => l.replace(/^- \[[\d-]+\] /, ""));
     for (const f of [ "ชอบแมว", "สอบวันที่ 5", "สอบวันที่ 12", "สอบวันที่ 1", "แฟนชอบหมา", "แฟนชอบแมว", "ไม่มีแมวแต่มีหมา" ]) assert.ok(facts.includes(f), f);
 });
+
+test("humanize: ไหม → มั้ย never touches a quote or a link", () => {
+    const out = humanize([ "[ตอบกลับ \"ไปไหม\"] ไปไหม https://x.org/ไหม" ], "");
+    assert.match(out[0], /^\[ตอบกลับ "ไปไหม"\] ไปมั้ย /);
+    assert.match(out[0], /https:\/\/x\.org\/ไหม/);
+});

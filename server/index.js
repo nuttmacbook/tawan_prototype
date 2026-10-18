@@ -28,6 +28,7 @@ const { loadState, describeMood, stageOf, agoText } = await import("./mood.js");
 const { loadThreads } = await import("./life.js");
 const { styleSettings } = await import("./humanize.js");
 const config = await import("./config.js");
+const world = await import("./world.js");
 const { claudeCodeStatus, API_MODEL, CC_MODEL } = await import("./llm.js");
 const { isLocal, clientIp, isHttps, lanAddresses, makeHostCheck, isOwnPage } = await import("./gate.js");
 
@@ -361,6 +362,12 @@ const routes = {
             date: body?.date,
         });
         return { ok: true, saved };
+    },
+
+    // The morning look-up again, now (from the Teach tab); takes a few minutes
+    "POST /api/today/refresh": async () => {
+        const info = await world.refreshNow();
+        return { ok: true, city: info?.city ?? "", text: await store.readEditable("today") };
     },
 
     "GET /api/search": async (_, url) => ({ results: await store.searchHistory(url.searchParams.get("q")) }),

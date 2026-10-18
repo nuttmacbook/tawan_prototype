@@ -1,5 +1,5 @@
 import { updateText } from "./fsutil.js";
-import { FILES, safeRead, today, appendToSection, lastSections, splitSections, sectionTitle, remember } from "./store.js";
+import { FILES, safeRead, today, appendToSection, lastSections, splitSections, joinSections, sectionTitle, remember } from "./store.js";
 
 /* ------------------------------------ threads (เรื่องค้าง) */
 
@@ -100,3 +100,77 @@ export async function loadDiary(days = 5) {
 
 export const readThreadsFile = () => safeRead(FILES.threads);
 export const readDiaryFile = () => safeRead(FILES.diary);
+
+/* ------------------------------------ people in her life (คนรอบตัว) */
+
+const PEOPLE_HEAD = [
+    "# คนรอบตัว",
+    "",
+    "> คนในชีวิตของตัวละคร ระบบเพิ่มและอัปเดตเองเมื่อเธอเล่าถึงใคร แก้เองได้ · ชื่อของแต่ละคนต้องคงเดิมทุกครั้งที่เล่า",
+    "",
+].join("\n");
+const MAX_NOTES_PER_PERSON = 6;
+const oneLine = (v, max = 160) => String(v ?? "").replace(/[\r\n]+/g, " ").replace(/^#+\s*/, "").trim().slice(0, max);
+
+/**
+ * Adds someone she talks about, or updates them, so the same friend keeps the same name and story.
+ * @param {{ name: string, relation?: string, trait?: string, update?: string }} person
+ *   relation: "เพื่อนสนิท", "แม่" · trait: what they're like · update: what happened with them now
+ */
+export async function notePerson({ name, relation = "", trait = "", update = "" } = {}) {
+    const who = oneLine(name, 40);
+    if (!who) return "ต้องบอกชื่อ";
+    const [ rel, kind, news ] = [ oneLine(relation, 60), oneLine(trait), oneLine(update) ];
+    let isNew = false;
+    await updateText(FILES.people, (text) => {
+        const doc = splitSections(text || PEOPLE_HEAD);
+        let index = doc.sections.findIndex((s) => sectionTitle(s) === who);
+        isNew = index < 0;
+        if (isNew) {
+            doc.sections.push(`## ${who}`);
+            index = doc.sections.length - 1;
+        }
+        const [ heading, ...lines ] = doc.sections[index].split("\n").filter((l) => l.trim());
+        const keep = (prefix, value) => {
+            const at = lines.findIndex((l) => l.startsWith(prefix));
+            if (!value) return;
+            if (at >= 0) lines[at] = `${prefix}${value}`;
+            else lines.unshift(`${prefix}${value}`);
+        };
+        keep("- นิสัย: ", kind);
+        keep("- เป็น: ", rel);
+        const notes = lines.filter((l) => /^- \[\d{4}-\d{2}-\d{2}\]/.test(l));
+        const facts = lines.filter((l) => !/^- \[\d{4}-\d{2}-\d{2}\]/.test(l));
+        if (news) notes.push(`- [${today()}] ${news}`);
+        doc.sections[index] = [ heading, ...facts, ...notes.slice(-MAX_NOTES_PER_PERSON) ].join("\n");
+        return joinSections(doc);
+    });
+    return `${isNew ? "รู้จักคนใหม่" : "อัปเดตคนรอบตัว"}: ${who}`;
+}
+
+const PEOPLE_BUDGET = 2500;
+
+/**
+ * The people worth having in mind for this conversation: everyone while the file is short,
+ * otherwise those just mentioned plus the ones with the newest news.
+ */
+export async function peopleFor(query) {
+    const text = await safeRead(FILES.people);
+    const doc = splitSections(text);
+    if (!doc.sections.length) return "";
+    const all = doc.sections.map((s) => s.trimEnd()).join("\n\n");
+    if (all.length <= PEOPLE_BUDGET) return all;
+    const q = String(query ?? "");
+    const latest = (s) => (s.match(/\[(\d{4}-\d{2}-\d{2})\]/g) ?? []).sort().at(-1) ?? "";
+    const ranked = doc.sections
+        .map((s) => ({ s: s.trimEnd(), isMentioned: q.includes(sectionTitle(s)), at: latest(s) }))
+        .sort((a, b) => Number(b.isMentioned) - Number(a.isMentioned) || b.at.localeCompare(a.at));
+    const chosen = [];
+    let used = 0;
+    for (const r of ranked) {
+        if (used + r.s.length > PEOPLE_BUDGET) continue;
+        chosen.push(r.s);
+        used += r.s.length;
+    }
+    return `${chosen.join("\n\n")}\n\n(ยังมีคนอื่นอีก ${doc.sections.length - chosen.length} คน ถ้าพูดถึงคนที่ไม่อยู่ในนี้ ใช้ชื่อเดิมที่เคยเล่า ไม่ต้องตั้งชื่อใหม่)`;
+}

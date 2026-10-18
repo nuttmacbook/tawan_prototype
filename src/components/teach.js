@@ -11,6 +11,8 @@ const FILES = [
     { id: "threads",   label: "เรื่องค้าง",   hint: "เรื่องที่รอถามต่อ" },
     { id: "diary",     label: "ไดอารี่",     hint: "ชีวิตของตัวละครเอง" },
     { id: "journal",   label: "บันทึกรายวัน", hint: "สรุปความทรงจำของแต่ละวัน" },
+    { id: "people",    label: "คนรอบตัว",   hint: "ชื่อและเรื่องของคนในชีวิตเธอ ให้เล่าถึงใครก็ชื่อเดิม" },
+    { id: "today",     label: "วันนี้",      hint: "ระบบเขียนใหม่ทุกเช้าจากการค้นเน็ต: อากาศ ซีรี่ เรื่องที่สนใจ แผนของวัน" },
 ];
 
 const field = (label, control, hint = "") => /*html*/`
@@ -155,6 +157,7 @@ const fileEditor = (state) => /*html*/`
         <div class="flex items-center gap-2">
             <button type="button" class="${BTN}" onclick="saveFile()" data-file-save>บันทึกไฟล์</button>
             <button type="button" class="${BTN_GHOST}" onclick="openFile()">โหลดใหม่</button>
+            <button type="button" class="${BTN_GHOST}" onclick="refreshToday()" data-today-refresh ${state?.file === "today" ? "" : "hidden"}>ค้นเน็ตใหม่ตอนนี้</button>
             <span class="ml-auto truncate text-xs text-slate-400" data-file-msg role="status">มีผลทันทีในข้อความถัดไป</span>
         </div>
     </section>
