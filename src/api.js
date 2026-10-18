@@ -73,4 +73,5 @@ export const api = {
     backupNow: () => call("/api/backup", {}),
     readFile: (name) => call(`/api/file?name=${encodeURIComponent(name)}`),
     writeFile: (name, text) => call("/api/file", { name, text }),
+    refreshToday: () => call("/api/today/refresh", {}),
 };

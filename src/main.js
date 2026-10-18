@@ -539,6 +539,7 @@ if (typeof window !== "undefined") {
         document.querySelectorAll("[data-file-btn]").forEach((el) => el.setAttribute("aria-selected", String(el.dataset.fileBtn === name)));
         const hint = $("[data-file-hint]");
         if (hint) hint.textContent = FILES.find((f) => f.id === name)?.hint ?? "";
+        $("[data-today-refresh]")?.toggleAttribute("hidden", name !== "today");
 
         const area = $("[data-file-text]");
         const msg = $("[data-file-msg]");
@@ -549,6 +550,26 @@ if (typeof window !== "undefined") {
             if (msg) msg.textContent = `data/${name}.md · มีผลทันทีในข้อความถัดไป`;
         } catch (err) {
             if (msg) msg.textContent = err.message;
+        }
+    };
+
+    // The morning look-up again, now; it searches the web, so it takes a few minutes
+    window.refreshToday = async () => {
+        const btn = $("[data-today-refresh]");
+        const msg = $("[data-file-msg]");
+        if (btn) btn.disabled = true;
+        if (msg) msg.textContent = "กำลังค้นเน็ต อาจใช้เวลาหลายนาที…";
+        try {
+            const res = await api.refreshToday();
+            if (state.file === "today") {
+                const area = $("[data-file-text]");
+                if (area && !state.isFileDirty) area.value = res?.text ?? "";
+            }
+            if (msg) msg.textContent = `✓ ค้นแล้ว${res?.city ? ` · ${res.city}` : ""}`;
+        } catch (err) {
+            if (msg) msg.textContent = err?.message ?? String(err);
+        } finally {
+            if (btn) btn.disabled = false;
         }
     };
 

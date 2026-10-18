@@ -89,19 +89,34 @@ function runProcess(args, { input = "", timeout = CC_TIMEOUT_MS, cwd = BRAIN_ROO
     return startProcess(args, { cwd }).send(input, timeout);
 }
 
-const replyArgs = (systemFile, imageCount) => [
-    "-p",
-    "--output-format", "json",
-    "--system-prompt-file", systemFile,
-    "--model", CC_MODEL,
-    "--max-turns", imageCount ? String(2 + imageCount) : "2",
-    "--no-session-persistence",
-    "--strict-mcp-config",
-    // Variadic flags go last; the prompt arrives on stdin, not as an argument.
+/**
+ * @param {string} systemFile
+ * @param {number} imageCount pictures copied next to the prompt
+ * @param {{ search?: boolean, fetch?: boolean }} [web] WebSearch for the morning look-up, WebFetch to open a link
+ */
+const replyArgs = (systemFile, imageCount, web = {}) => {
     // Read is allowed for the copied pictures only: a bare "Read" would let a crafted persona file
-    // talk her into opening anything on this computer (~/.ssh, .env) and quoting it in chat.
-    ...(imageCount ? [ "--tools", "Read", "--allowedTools", "Read(./img-*)" ] : [ "--disallowedTools", "*" ]),
-];
+    // talk her into opening anything on this computer (~/.ssh, .env) and quoting it in chat
+    const tools = [
+        ...(imageCount ? [ [ "Read", "Read(./img-*)" ] ] : []),
+        ...(web.fetch ? [ [ "WebFetch", "WebFetch" ] ] : []),
+        ...(web.search ? [ [ "WebSearch", "WebSearch" ] ] : []),
+    ];
+    const turns = 2 + imageCount + (web.fetch ? 4 : 0) + (web.search ? 10 : 0);
+    return [
+        "-p",
+        "--output-format", "json",
+        "--system-prompt-file", systemFile,
+        "--model", CC_MODEL,
+        "--max-turns", String(turns),
+        "--no-session-persistence",
+        "--strict-mcp-config",
+        // Variadic flags go last; the prompt arrives on stdin, not as an argument
+        ...(tools.length
+            ? [ "--tools", tools.map(([ t ]) => t).join(","), "--allowedTools", ...tools.map(([ , rule ]) => rule) ]
+            : [ "--disallowedTools", "*" ]),
+    ];
+};
 
 /* ------------------------------------ a claude started ahead of time */
 
@@ -182,31 +197,32 @@ for (const signal of [ "SIGINT", "SIGTERM" ]) {
  *   keepWarm: chat replies; the next one will likely use the same system prompt, so start it now
  * @returns {Promise<string>} the model's text
  */
-export async function askClaudeCode({ system, prompt, images = [], keepWarm = false }) {
+export async function askClaudeCode({ system, prompt, images = [], keepWarm = false, web = {}, timeout = CC_TIMEOUT_MS }) {
     const started = Date.now();
+    const isPlain = !images.length && !web.search && !web.fetch;
     // Use the claude started ahead of time when it's ready, alive and set up for this same system prompt
-    let run = images.length ? null : takeSpare(system);
+    let run = isPlain ? takeSpare(system) : null;
     let isWarm = Boolean(run);
 
     try {
         let result;
         try {
-            if (!run) run = await prepareRun(system, images);
-            result = await finish(run, prompt);
+            if (!run) run = await prepareRun(system, images, web);
+            result = await finish(run, prompt, timeout);
         } catch (err) {
             // Only a spare that quit the moment it got the prompt is retried the normal way.
             // A real answer that failed (timeout, usage limit, model error) is not: that would double the wait and the cost.
             if (!isWarm || !err?.isEarlyExit) throw err;
             run.cleanup();
-            run = await prepareRun(system, images);
+            run = await prepareRun(system, images, web);
             isWarm = false;
-            result = await finish(run, prompt);
+            result = await finish(run, prompt, timeout);
         }
         lastUsage = { ...(lastUsage ?? {}), ms: Date.now() - started, isWarm };
         return result;
     } finally {
         run?.cleanup();
-        if (keepWarm && !images.length) prepareSpare(system);
+        if (keepWarm) prepareSpare(system);
     }
 }
 
@@ -214,7 +230,7 @@ export async function askClaudeCode({ system, prompt, images = [], keepWarm = fa
  * A folder of its own per call: a memory tidy-up running in the background must never
  * swap its prompt or pictures with the chat reply being written at the same time.
  */
-async function prepareRun(system, images) {
+async function prepareRun(system, images, web = {}) {
     await mkdir(BRAIN_ROOT, { recursive: true });
     const dir = await mkdtemp(path.join(BRAIN_ROOT, "run-"));
     const cleanup = () => rm(dir, { recursive: true, force: true }).catch(() => {});
@@ -232,7 +248,7 @@ async function prepareRun(system, images) {
                 // A picture that's gone shouldn't block the whole reply
             }
         }
-        const proc = startProcess(replyArgs(systemFile, names.length), { cwd: dir });
+        const proc = startProcess(replyArgs(systemFile, names.length, web), { cwd: dir });
         return { dir, system, proc, cleanup, names };
     } catch (err) {
         await cleanup();
@@ -240,13 +256,13 @@ async function prepareRun(system, images) {
     }
 }
 
-async function finish(run, prompt) {
+async function finish(run, prompt, timeout = CC_TIMEOUT_MS) {
     const names = run.names ?? [];
     const imageNote = names.length
         ? `\n\nผู้ใช้ส่งรูปมา ${names.length} รูป ใช้เครื่องมือ Read เปิดดูไฟล์ ${names.map((n) => `./${n}`).join(", ")} ก่อนตอบ`
         : "";
     const sentAt = Date.now();
-    const { code, out, err } = await run.proc.send(`${prompt}${imageNote}`);
+    const { code, out, err } = await run.proc.send(`${prompt}${imageNote}`, timeout);
     // Quit straight away with nothing on stdout: it never got to work on the prompt
     const isEarlyExit = code !== 0 && !String(out).trim() && Date.now() - sentAt < EARLY_EXIT_MS;
 
@@ -319,7 +335,41 @@ async function apiClient() {
 /** One Messages API call; the tool loop lives in brain.js */
 export async function askApi(params) {
     const c = await apiClient();
-    return c.messages.create({ model: API_MODEL, max_tokens: 1024, ...params });
+    // Web fetch started as a beta; the header is harmless where it's already standard
+    const usesFetch = (params?.tools ?? []).some((t) => t?.type === WEB_FETCH_TOOL.type);
+    const options = usesFetch ? { headers: { "anthropic-beta": "web-fetch-2025-09-10" } } : undefined;
+    return c.messages.create({ model: API_MODEL, max_tokens: 1024, ...params }, options);
+}
+
+/* ------------------------------------ web tools that run on Anthropic's side (API key mode) */
+
+/** Web search, biased to where she lives */
+export const webSearchTool = (city = "") => ({
+    type: "web_search_20250305",
+    name: "web_search",
+    max_uses: 6,
+    user_location: { type: "approximate", ...(city ? { city } : {}), country: "TH", timezone: "Asia/Bangkok" },
+});
+
+/** Reads a page whose address is already in the conversation (a link you sent her) */
+export const WEB_FETCH_TOOL = { type: "web_fetch_20250910", name: "web_fetch", max_uses: 3 };
+
+/**
+ * One request that may use server-side web tools. Long searches can stop with "pause_turn";
+ * the reply so far is sent back unchanged so the server continues where it left off.
+ * @returns {Promise<{ text: string, res: object }>}
+ */
+export async function askApiWithWeb({ system, messages, tools, max_tokens = 4000 }) {
+    const convo = [ ...messages ];
+    let res = null;
+    for (let i = 0; i < 4; i++) {
+        res = await askApi({ system, messages: convo, tools, max_tokens });
+        if (res?.stop_reason !== "pause_turn") break;
+        convo.push({ role: "assistant", content: res.content });
+    }
+    // With citations a paragraph arrives in several text blocks; they belong together
+    const text = (Array.isArray(res?.content) ? res.content : []).filter((b) => b?.type === "text").map((b) => b.text).join("").trim();
+    return { text, res };
 }
 
 export const hasApiKey = () => Boolean(process.env.ANTHROPIC_API_KEY);

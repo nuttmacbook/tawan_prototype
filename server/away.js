@@ -2,6 +2,7 @@ import { loadState } from "./mood.js";
 import { planReply } from "./pacing.js";
 import { loadSettings, saveSettings, currentId, pinProfile, getActiveId, listProfiles } from "./profiles.js";
 import { getConfig } from "./config.js";
+import { maybeRefresh } from "./world.js";
 
 /* ------------------------------------ config */
 
@@ -115,6 +116,8 @@ export function startAwayScheduler(send, deps) {
 
     async function tick(isOnScreen) {
         try {
+            // Her morning look-up runs in the background (still pinned to her), even while you chat
+            maybeRefresh();
             if (isOnScreen && isChatOpen()) return;
             if (deps && (await answerWhileClosed(deps))) return;
             const { awayPingHours: AWAY_HOURS, awayPerDay: MAX_PER_DAY } = await getConfig();

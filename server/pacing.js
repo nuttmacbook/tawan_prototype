@@ -1,6 +1,7 @@
 import { loadState } from "./mood.js";
 import { loadTexts } from "./store.js";
 import { currentId } from "./profiles.js";
+import { todayActivities } from "./world.js";
 
 /* ------------------------------------ config */
 
@@ -99,6 +100,9 @@ function activityAt(now, { hour, isInChat, isAsleep, lonely, activities }) {
     return null;
 }
 
+/** Today's plan from the morning look-up comes first, then her usual habits from persona.md */
+const planned = async (persona) => [ ...(await todayActivities().catch(() => [])), ...parseActivities(persona) ];
+
 /* ------------------------------------ helpers */
 
 const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
@@ -107,7 +111,7 @@ const jitter = (n) => n * (1 + (Math.random() * 2 - 1) * PACING.jitter);
 const moodOf = (state, name) => Number(state?.moods?.find((m) => m.name === name)?.value ?? 0);
 
 /** Reads "- เวลาตื่น: 10", "- เวลานอน: 2", "- ความเร็วพิมพ์: 6" from persona.md */
-const personaHabits = (persona) => {
+export const personaHabits = (persona) => {
     const num = (label) => {
         const v = Number(String(persona ?? "").match(new RegExp(`${label}\\s*[:：]\\s*(\\d+(?:\\.\\d+)?)`))?.[1]);
         return Number.isFinite(v) ? v : null;
@@ -193,7 +197,7 @@ export async function planReply({ texts = [], lastAgentAt = 0, lastReadAt = 0, n
     readMs = clamp(jitter(readMs), 500, PACING.maxReadMs);
 
     // Greeting and nudge plans (no texts) are her own choice to talk, so no activity applies
-    const busy = texts.length ? activityAt(now, { hour, isInChat, isAsleep, lonely, activities: parseActivities(persona) }) : null;
+    const busy = texts.length ? activityAt(now, { hour, isInChat, isAsleep, lonely, activities: await planned(persona) }) : null;
     let laterMs = 0;
     if (busy?.phoneAway) {
         readMs = Math.max(readMs, busy.until - now + between([ 1000, 6000 ]));

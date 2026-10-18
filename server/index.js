@@ -28,6 +28,7 @@ const { loadState, describeMood, stageOf, agoText } = await import("./mood.js");
 const { loadThreads } = await import("./life.js");
 const { styleSettings } = await import("./humanize.js");
 const config = await import("./config.js");
+const world = await import("./world.js");
 const { claudeCodeStatus, API_MODEL, CC_MODEL } = await import("./llm.js");
 const { isLocal, clientIp, isHttps, lanAddresses, makeHostCheck, isOwnPage } = await import("./gate.js");
 
@@ -363,6 +364,12 @@ const routes = {
         return { ok: true, saved };
     },
 
+    // The morning look-up again, now (from the Teach tab); takes a few minutes
+    "POST /api/today/refresh": async () => {
+        const info = await world.refreshNow();
+        return { ok: true, city: info?.city ?? "", text: await store.readEditable("today") };
+    },
+
     "GET /api/search": async (_, url) => ({ results: await store.searchHistory(url.searchParams.get("q")) }),
 
     "GET /api/status": statusPayload,
@@ -547,6 +554,22 @@ async function handleApiNow(req, res, url) {
             return res.end(bytes);
         } catch (err) {
             return send(res, 404, { error: err?.message ?? "ไม่พบรูป" });
+        }
+    }
+    // Her own photos (data/personas/<id>/photos), only names that are really in that folder
+    if (req.method === "GET" && url.pathname.startsWith("/api/photo/")) {
+        let name = "";
+        try {
+            name = decodeURIComponent(url.pathname.slice(11));
+        } catch {}
+        const file = await world.photoFile(name);
+        if (!file) return send(res, 404, { error: "ไม่พบรูป" });
+        try {
+            const ext = path.extname(file).slice(1).toLowerCase();
+            res.writeHead(200, { "content-type": `image/${ext === "jpg" ? "jpeg" : ext}`, "cache-control": "private, max-age=86400" });
+            return res.end(await readFile(file));
+        } catch {
+            return send(res, 404, { error: "ไม่พบรูป" });
         }
     }
     // A character file is a download, not JSON for the page

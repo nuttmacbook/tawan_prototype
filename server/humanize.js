@@ -110,10 +110,11 @@ export function humanizeReply(bubbles, style, { allowTypo = true } = {}) {
         return t.trim();
     }).filter(Boolean);
 
-    // A typo needs a later bubble to fix it, and never in messages with numbers (hotlines, times)
+    // A typo needs a later bubble to fix it, and never in messages with numbers (hotlines, times),
+    // links (a broken link) or app tokens like [ส่งรูป:...] / [ตอบกลับ "..."]
     if (allowTypo && s.typo > 0 && Math.random() < s.typo && out.length) {
         const i = Math.floor(Math.random() * out.length);
-        if (!/\d/.test(out[i])) {
+        if (!/\d|\[|https?:/.test(out[i])) {
             const typo = makeTypo(out[i]);
             if (typo && Math.random() < s.typoUnsend) {
                 // Sent with the typo, taken back, then sent again correctly

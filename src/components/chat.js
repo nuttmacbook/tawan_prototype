@@ -21,6 +21,26 @@ const STICKERS = [
 ];
 
 const IMAGE_TOKEN = /\[รูป:([a-z0-9]+\.(?:jpg|png|webp|gif))\]/g;
+// A picture from her own photos folder (data/personas/<id>/photos/), sent by her
+const HER_PHOTO = /\[รูปเธอ:([^\]\/\\]{1,120})\]/g;
+// http(s) only; trailing punctuation stays outside the link
+const URL_IN_TEXT = /https?:\/\/[^\s<>"']+[^\s<>"'.,!?)\]]/g;
+
+/**
+ * Text with web links made clickable. Every piece is escaped on its own, so a link can't
+ * smuggle markup in, and links open in a new tab without access back to this page.
+ */
+const withLinks = (text) => {
+    const s = String(text ?? "");
+    let out = "";
+    let last = 0;
+    for (const m of s.matchAll(URL_IN_TEXT)) {
+        out += esc(s.slice(last, m.index));
+        out += `<a href="${esc(m[0])}" target="_blank" rel="noopener noreferrer nofollow" onclick="event.stopPropagation()" class="break-all underline decoration-current/50 underline-offset-2">${esc(m[0])}</a>`;
+        last = m.index + m[0].length;
+    }
+    return out + esc(s.slice(last));
+};
 const REPLY_TOKEN = /^\[ตอบกลับ "([^"]*)"\]\s*/;
 const EMOJI_ONLY = /^(?:\p{Extended_Pictographic}|\p{Emoji_Modifier}|\u200d|\ufe0f|\s){1,12}$/u;
 
@@ -30,8 +50,11 @@ const EMOJI_ONLY = /^(?:\p{Extended_Pictographic}|\p{Emoji_Modifier}|\u200d|\ufe
  */
 const parseMessage = (raw) => {
     let text = String(raw ?? "");
-    const images = [ ...text.matchAll(IMAGE_TOKEN) ].map((m) => m[1]);
-    text = text.replace(IMAGE_TOKEN, "").trim();
+    const images = [
+        ...[ ...text.matchAll(IMAGE_TOKEN) ].map((m) => `/api/upload/${m[1]}`),
+        ...[ ...text.matchAll(HER_PHOTO) ].map((m) => `/api/photo/${encodeURIComponent(m[1])}`),
+    ];
+    text = text.replace(IMAGE_TOKEN, "").replace(HER_PHOTO, "").trim();
     const reply = text.match(REPLY_TOKEN)?.[1] ?? "";
     text = text.replace(REPLY_TOKEN, "").trim();
     const isSticker = Boolean(text) && !images.length && EMOJI_ONLY.test(text) && /\p{Extended_Pictographic}/u.test(text);
@@ -72,8 +95,8 @@ const bubble = (who, raw, { id = "", receipt = "", time = "", canUnsend = true, 
         <span class="mb-1 block border-l-2 ${isUser ? "border-slate-950/40 text-slate-900/80" : "border-sky-400/60 text-slate-400"} pl-2 text-xs">${esc(msg.reply)}</span>
     ` : "";
 
-    const pictures = msg.images.map((name) => /*html*/`
-        <img src="/api/upload/${esc(name)}" alt="รูปที่ส่ง" loading="lazy" onclick="event.stopPropagation(); openImage(this.src)"
+    const pictures = msg.images.map((src) => /*html*/`
+        <img src="${esc(src)}" alt="รูปที่ส่ง" loading="lazy" onclick="event.stopPropagation(); openImage(this.src)"
             class="max-h-64 w-auto max-w-full cursor-zoom-in rounded-2xl object-cover ring-1 ring-white/10" />
     `).join("");
 
@@ -81,7 +104,7 @@ const bubble = (who, raw, { id = "", receipt = "", time = "", canUnsend = true, 
     if (msg.isSticker) {
         body = `<p class="text-5xl leading-none sm:text-6xl" data-text>${esc(msg.text)}</p>`;
     } else if (msg.text || quote) {
-        body = `<p class="whitespace-pre-wrap break-words px-3.5 py-2 text-[15px] leading-relaxed ${bubbleTone}">${quote}<span data-text>${esc(msg.text)}</span>${isEdited ? `<span class="ml-1.5 text-[10px] opacity-60" data-edited>แก้ไขแล้ว</span>` : ""}</p>`;
+        body = `<p class="whitespace-pre-wrap break-words px-3.5 py-2 text-[15px] leading-relaxed ${bubbleTone}">${quote}<span data-text>${withLinks(msg.text)}</span>${isEdited ? `<span class="ml-1.5 text-[10px] opacity-60" data-edited>แก้ไขแล้ว</span>` : ""}</p>`;
     }
 
     return /*html*/`
@@ -221,6 +244,7 @@ const PART_LABELS = {
     memory: "ความจำ",
     journal: "บันทึกรายวัน",
     diary: "ไดอารี่",
+    world: "วันนี้ + คนรอบตัว",
     conversation: "บทสนทนา",
 };
 const WARN_CHARS = 30000;

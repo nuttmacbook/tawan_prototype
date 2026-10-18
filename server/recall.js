@@ -12,17 +12,22 @@ const TEACHINGS_BUDGET = 2500;
 const CORE_TOPICS = /เกี่ยวกับผู้ใช้|ชื่อเรียก|สิ่งที่ผู้ใช้ขอให้จำ/;
 const CORE_SHARE = 0.45;
 
-/* ------------------------------------ matching */
-
 /* ------------------------------------ memory */
+
+// Never fade: who you are, what she calls you, what you asked her to remember, your inside jokes
+const KEEP_TOPICS = /เกี่ยวกับผู้ใช้|ชื่อเรียก|สิ่งที่ผู้ใช้ขอให้จำ|มุกภายใน/;
+const dayOf = (line) => line.match(/^- \[(\d{4}-\d{2}-\d{2})\]/)?.[1] ?? "";
 
 /**
  * Picks the memory lines that matter for the current conversation, keeping file order and topics.
  * @param {string} memory full memory.md
  * @param {string} query recent conversation text
+ * @param {number} [budget] characters
+ * @param {{ fadeDays?: number, now?: number }} [options] fadeDays: small facts older than this
+ *   are only recalled when the conversation touches them, the way people forget details (0 = never)
  * @returns {{ text: string, kept: number, total: number }}
  */
-export function selectMemory(memory, query, budget = MEMORY_BUDGET) {
+export function selectMemory(memory, query, budget = MEMORY_BUDGET, { fadeDays = 0, now = Date.now() } = {}) {
     const text = String(memory ?? "");
     const doc = splitSections(text);
     const items = [];
@@ -33,13 +38,22 @@ export function selectMemory(memory, query, budget = MEMORY_BUDGET) {
         });
     });
 
-    if (text.length <= budget) return { text, kept: items.length, total: items.length };
-
     const q = gramsOf(query);
+    // Old everyday details fade unless something in the chat brings them back
+    const cutoff = fadeDays > 0 ? new Date(now - fadeDays * 86400000).toLocaleDateString("sv-SE") : "";
+    const isFaded = (x) => cutoff && !KEEP_TOPICS.test(x.topic) && dayOf(x.line) && dayOf(x.line) < cutoff
+        && overlap(gramsOf(`${x.topic} ${x.line}`), q) === 0;
+    const faded = items.filter(isFaded);
+    if (text.length <= budget && !faded.length) return { text, kept: items.length, total: items.length };
+    if (text.length <= budget) {
+        const keep = new Set(items.filter((x) => !isFaded(x)));
+        return rebuild(items, keep, faded.length);
+    }
+
     const chosen = new Set();
     let used = 0;
     const take = (item, limit) => {
-        if (chosen.has(item) || used + item.line.length + 1 > limit) return;
+        if (chosen.has(item) || isFaded(item) || used + item.line.length + 1 > limit) return;
         chosen.add(item);
         used += item.line.length + 1;
     };
@@ -53,15 +67,19 @@ export function selectMemory(memory, query, budget = MEMORY_BUDGET) {
         .forEach((r) => take(r.x, budget));
     [ ...items ].reverse().forEach((x) => take(x, budget));
 
+    return rebuild(items, chosen, items.length - chosen.size);
+}
+
+/** The chosen memory lines back in file order under their topics, with a note about the rest */
+function rebuild(items, chosen, skipped) {
     const byTopic = new Map();
     for (const x of items.filter((it) => chosen.has(it))) {
         if (!byTopic.has(x.topic)) byTopic.set(x.topic, []);
         byTopic.get(x.topic).push(x.line);
     }
     const body = [ ...byTopic ].map(([ topic, lines ]) => `## ${topic}\n${lines.join("\n")}`).join("\n\n");
-    const skipped = items.length - chosen.size;
     return {
-        text: `${body}\n\n(ยังมีความจำอีก ${skipped} เรื่องที่ไม่เกี่ยวกับตอนนี้ ถ้าผู้ใช้ถามถึงเรื่องที่ไม่อยู่ในนี้ ให้บอกตามจริงว่าจำไม่ค่อยได้)`,
+        text: `${body}\n\n(ยังมีความจำอีก ${skipped} เรื่องที่ไม่เกี่ยวกับตอนนี้หรือนานจนเลือนแล้ว ถ้าผู้ใช้ถามถึงเรื่องที่ไม่อยู่ในนี้ ให้ตอบแบบคนที่จำได้ลาง ๆ หรือบอกตามจริงว่าจำไม่ค่อยได้ ห้ามแต่งรายละเอียด)`,
         kept: chosen.size,
         total: items.length,
     };
