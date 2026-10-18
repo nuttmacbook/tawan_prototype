@@ -34,18 +34,21 @@ const defaults = () =>
 
 // Read on every reply and every minute by the scheduler; a short cache keeps that off the disk
 let cache = null;
+let version = 0;
 const CACHE_MS = 2000;
 
 /** Current settings: what the page saved, otherwise .env, otherwise the default */
 export async function getConfig() {
     if (cache && Date.now() - cache.at < CACHE_MS) return cache.value;
+    // A read that started before a save must not put the old values back in the cache
+    const started = version;
     const saved = (await loadSettings())?.config ?? {};
     const value = defaults();
     for (const [ key, f ] of Object.entries(FIELDS)) {
         const v = clean(f, saved[key]);
         if (v !== undefined) value[key] = v;
     }
-    cache = { at: Date.now(), value };
+    if (started === version) cache = { at: Date.now(), value };
     return value;
 }
 
@@ -60,6 +63,7 @@ export async function setConfig(patch) {
         if (v !== undefined) changes[key] = v;
     }
     await saveSettings((current) => ({ config: { ...(current?.config ?? {}), ...changes } }));
+    version++;
     cache = null;
     return getConfig();
 }

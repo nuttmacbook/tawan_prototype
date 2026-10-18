@@ -106,11 +106,18 @@ const replyArgs = (systemFile, imageCount) => [
 /* ------------------------------------ a claude started ahead of time */
 
 // CLAUDE_PREWARM=0 turns this off if your Claude Code version doesn't like waiting for its prompt
-const PREWARM = !/^(0|false|no)$/i.test(String(process.env.CLAUDE_PREWARM ?? ""));
+// CLAUDE_PREWARM=0 turns this off if your Claude Code version doesn't like waiting for its prompt
+let prewarm = !/^(0|false|no)$/i.test(String(process.env.CLAUDE_PREWARM ?? ""));
 const SPARE_IDLE_MS = 15 * 60000;
+// Some Claude Code versions give up when no prompt arrives within a few seconds; after this many
+// spares found already gone, starting them ahead is only wasted work, so it switches itself off
+const MAX_DEAD_SPARES = 3;
+const EARLY_EXIT_MS = 4000;
 
 /** One claude process already started for the next chat reply, with the same system prompt */
 let spare = null;
+let spareGeneration = 0;
+let deadSpares = 0;
 
 function dropSpare() {
     const old = spare;
@@ -123,20 +130,40 @@ function dropSpare() {
 
 /** Starts the next reply's claude in the background; the system prompt only changes when files are edited */
 function prepareSpare(system) {
-    if (!PREWARM) return;
+    if (!prewarm) return;
     dropSpare();
+    // If two of these overlap, the newest wins: it has the latest system prompt
+    const generation = ++spareGeneration;
     prepareRun(system, []).then((run) => {
-        // An idle claude shouldn't sit there forever
-        run.idleTimer = setTimeout(() => {
-            if (spare === run) dropSpare();
-        }, SPARE_IDLE_MS);
-        if (spare) {
+        if (generation !== spareGeneration) {
             run.proc.kill();
             run.cleanup();
             return;
         }
+        // An idle claude shouldn't sit there forever
+        run.idleTimer = setTimeout(() => {
+            if (spare === run) dropSpare();
+        }, SPARE_IDLE_MS);
         spare = run;
     }).catch(() => {});
+}
+
+/** Takes the spare if it fits this call; notes it when one died while waiting */
+function takeSpare(system) {
+    if (!spare || spare.system !== system) return null;
+    const run = spare;
+    spare = null;
+    clearTimeout(run.idleTimer);
+    if (run.proc.isAlive()) {
+        deadSpares = 0;
+        return run;
+    }
+    run.cleanup();
+    if (++deadSpares >= MAX_DEAD_SPARES && prewarm) {
+        prewarm = false;
+        console.log("  ℹ Claude Code เวอร์ชันนี้ไม่รอข้อความที่เปิดไว้ล่วงหน้า ปิดการเตรียมล่วงหน้าไปก่อน (ตั้ง CLAUDE_PREWARM=0 ได้ถ้าไม่อยากให้ลอง)");
+    }
+    return null;
 }
 
 // A spare left behind would be waiting on a prompt that never comes; stop it with the server.
@@ -158,14 +185,8 @@ for (const signal of [ "SIGINT", "SIGTERM" ]) {
 export async function askClaudeCode({ system, prompt, images = [], keepWarm = false }) {
     const started = Date.now();
     // Use the claude started ahead of time when it's ready, alive and set up for this same system prompt
-    let run = null;
-    let isWarm = false;
-    if (!images.length && spare && spare.system === system && spare.proc.isAlive()) {
-        run = spare;
-        spare = null;
-        clearTimeout(run.idleTimer);
-        isWarm = true;
-    }
+    let run = images.length ? null : takeSpare(system);
+    let isWarm = Boolean(run);
 
     try {
         let result;
@@ -173,8 +194,9 @@ export async function askClaudeCode({ system, prompt, images = [], keepWarm = fa
             if (!run) run = await prepareRun(system, images);
             result = await finish(run, prompt);
         } catch (err) {
-            // A spare that went bad while waiting must not cost the reply: try once more the normal way
-            if (!isWarm || /ล็อกอิน|ไม่พบคำสั่ง/.test(err?.message ?? "")) throw err;
+            // Only a spare that quit the moment it got the prompt is retried the normal way.
+            // A real answer that failed (timeout, usage limit, model error) is not: that would double the wait and the cost.
+            if (!isWarm || !err?.isEarlyExit) throw err;
             run.cleanup();
             run = await prepareRun(system, images);
             isWarm = false;
@@ -223,7 +245,10 @@ async function finish(run, prompt) {
     const imageNote = names.length
         ? `\n\nผู้ใช้ส่งรูปมา ${names.length} รูป ใช้เครื่องมือ Read เปิดดูไฟล์ ${names.map((n) => `./${n}`).join(", ")} ก่อนตอบ`
         : "";
+    const sentAt = Date.now();
     const { code, out, err } = await run.proc.send(`${prompt}${imageNote}`);
+    // Quit straight away with nothing on stdout: it never got to work on the prompt
+    const isEarlyExit = code !== 0 && !String(out).trim() && Date.now() - sentAt < EARLY_EXIT_MS;
 
     let parsed = null;
     try {
@@ -237,7 +262,9 @@ async function finish(run, prompt) {
         if (/login|auth|credential|401/i.test(reason)) {
             throw new Error("Claude ในเครื่องยังไม่ได้ล็อกอิน เปิด terminal แล้วพิมพ์ claude เพื่อล็อกอินก่อน");
         }
-        throw new Error(`Claude ในเครื่องผิดพลาด: ${reason.slice(0, 300)}`);
+        const error = new Error(`Claude ในเครื่องผิดพลาด: ${reason.slice(0, 300)}`);
+        error.isEarlyExit = isEarlyExit;
+        throw error;
     }
 
     lastUsage = usageOf(parsed?.usage, parsed?.total_cost_usd);

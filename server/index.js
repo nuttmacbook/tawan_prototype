@@ -14,7 +14,7 @@ process.on("unhandledRejection", (err) => console.error("unhandled:", err?.stack
 
 const {
     chat, greet, nudge, warmUp, resetSession, personaName, brainMode, consolidateHistory, compactMemory, hasApiKey, presence,
-    addReaction, awayPing, switchExclusive, noteUnsent, promptStats, cutLastReply,
+    addReaction, awayPing, switchExclusive, forgetSession, noteUnsent, promptStats, cutLastReply,
 } = await import("./brain.js");
 const profiles = await import("./profiles.js");
 const away = await import("./away.js");
@@ -105,12 +105,24 @@ const EMPTY_REPLY = { bubbles: [], notes: [] };
 /** Several replies as one, for a request that waited on an answer already being written */
 const mergeReplies = (list) => {
     const done = list.filter(Boolean);
+    // A bubble she takes back is counted from the start of the merged list, not of its own reply
+    const unsend = [];
+    let offset = 0;
+    for (const r of done) {
+        for (const i of r?.unsend ?? []) unsend.push(i + offset);
+        offset += r?.bubbles?.length ?? 0;
+    }
     return {
         ...(done.at(-1) ?? EMPTY_REPLY),
         bubbles: done.flatMap((r) => r?.bubbles ?? []),
         notes: done.flatMap((r) => r?.notes ?? []),
+        unsend,
+        hesitate: done.some((r) => r?.hesitate),
     };
 };
+
+/** The bubbles that stay on screen: a typo she takes back isn't something to put on a lock screen */
+const visibleBubbles = (result) => (result?.bubbles ?? []).filter((_, i) => !(result?.unsend ?? []).includes(i));
 
 /**
  * Answers the given pending messages and only then removes them from the queue,
@@ -154,7 +166,7 @@ async function replyToPending(ids, context = {}) {
             noteUnsent(m.text);
         }
         maybeTidyMemory();
-        if (result?.bubbles?.length && !isWatching()) pushMessage(result.bubbles);
+        if (result?.bubbles?.length && !isWatching()) pushMessage(visibleBubbles(result));
         settle.resolve(result);
         return mergeReplies([ ...earlier, result ]);
     } catch (err) {
@@ -287,7 +299,7 @@ const routes = {
 
     "POST /api/profiles/import": async (body) => {
         const { id, name } = await portable.importProfile(body?.pack);
-        await switchExclusive(() => profiles.switchProfile(id));
+        await switchExclusive(() => profiles.switchProfile(id), { reset: true });
         clearActivity();
         return { id, name };
     },
@@ -301,7 +313,7 @@ const routes = {
 
     "POST /api/profiles/create": async (body) => {
         const id = await profiles.createProfile({ name: body?.name, copyFrom: body?.copy ? profiles.getActiveId() : "" });
-        await switchExclusive(() => profiles.switchProfile(id));
+        await switchExclusive(() => profiles.switchProfile(id), { reset: true });
         clearActivity();
         return { id };
     },
@@ -315,6 +327,8 @@ const routes = {
 
     "POST /api/profiles/delete": async (body) => {
         await profiles.deleteProfile(body?.id);
+        // A new character could get this id one day; she must not inherit anything from this one
+        forgetSession(String(body?.id ?? ""));
         return { profiles: await profiles.listProfiles() };
     },
 

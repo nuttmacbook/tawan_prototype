@@ -140,7 +140,8 @@ export function startAwayScheduler(send, deps) {
 
             const result = await send(quietHours);
             if (!result?.bubbles?.length) return;
-            await deps?.onAgentMessage?.(result.bubbles);
+            // Without a typo she took back
+            await deps?.onAgentMessage?.(result.bubbles.filter((_, i) => !(result.unsend ?? []).includes(i)));
             // Read again: other settings may have changed while she was writing
             await saveSettings((latest) => ({
                 awayPings: { ...(latest?.awayPings ?? {}), [id]: { date: today(), count: count + 1, lastAt: Date.now() } },

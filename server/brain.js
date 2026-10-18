@@ -5,7 +5,7 @@ import {
     pastHistoryFiles, archiveHistory, appendJournal, loadSettings, logTurn, logReaction, replaceLoggedLine, bubblesForLog, uploadsDir, todayEntries,
 } from "./store.js";
 import { loadState, passTime, markUserMessage, gapSinceUser, adjustMood, describeMood, stageOf, humanGap, agoText, timeOfDay } from "./mood.js";
-import { currentId } from "./profiles.js";
+import { currentId, getActiveId } from "./profiles.js";
 import { loadThreads, addThread, closeThread, writeDiary, loadDiary } from "./life.js";
 import { askApi, askClaudeCode, hasApiKey, usageOf, claudeCodeUsage } from "./llm.js";
 import { humanizeReply, userStyleNote, repetitionNote } from "./humanize.js";
@@ -30,6 +30,9 @@ const newSession = () => ({
     pendingReactions: [],
     lastReply: null,
     draft: null,
+    // The debug meter shows each character's own last turn
+    lastPrompt: null,
+    lastUsage: null,
 });
 
 /** The session of the character this work is pinned to (see profiles.pinProfile) */
@@ -47,6 +50,9 @@ const me = new Proxy({}, {
         return true;
     },
 });
+
+/** Drops everything a character had in mind, e.g. when she's deleted */
+export const forgetSession = (id) => sessions.delete(id);
 
 /** Loads what she needs before her first turn: the tail of the last chat log, and time passing on her mood */
 async function warm() {
@@ -410,8 +416,6 @@ const API_SILENT_GUIDE = `แยกแต่ละ bubble ด้วยบรร�
 /** Short-term memory for this server run, shared by both brains */
 let lock = Promise.resolve();
 let turnImageNote = "";
-let lastPrompt = null;
-let lastUsage = null;
 const IMAGE_TOKEN = /\[รูป:([\w.-]+)\]/g;
 
 /** Serializes turns so an idle nudge can't interleave with a user message */
@@ -452,7 +456,7 @@ async function contextFor(replyNote = "") {
         diary: diary.recent.length,
         conversation: recentTurns().reduce((n, t) => n + t.text.length, 0),
     };
-    lastPrompt = {
+    me.lastPrompt = {
         at: Date.now(),
         parts,
         memory: { kept: memory.kept, total: memory.total, fileChars: texts.memory.length },
@@ -511,7 +515,7 @@ async function apiTurn(notes, replyNote = "", images = []) {
 
         const content = Array.isArray(res?.content) ? res.content : [];
         messages.push({ role: "assistant", content });
-        lastUsage = usageOf(res?.usage);
+        me.lastUsage = usageOf(res?.usage);
 
         const toolUses = content.filter((b) => b?.type === "tool_use");
         if (res?.stop_reason !== "tool_use" || toolUses.length === 0) {
@@ -560,10 +564,11 @@ async function claudeCodeTurn(notes, replyNote = "", images = []) {
         system: `${stable}\n\n${JSON_REPLY_GUIDE}`,
         prompt: `<context>\n${now}\n</context>\n\n<conversation>\n${history}\n</conversation>\n\nตอบข้อความล่าสุดของผู้ใช้ในรูปแบบ JSON ตาม <reply_format>`,
         images,
-        keepWarm: true,
+        // Only for the character on screen: a background reply for someone else would replace her spare
+        keepWarm: currentId() === getActiveId(),
     });
 
-    lastUsage = claudeCodeUsage();
+    me.lastUsage = claudeCodeUsage();
     const reply = parseJsonReply(text);
     // A model that ignored the format still said something worth showing
     if (!reply) return text.includes(SILENT) ? [] : toBubbles(text);
@@ -613,7 +618,7 @@ async function turn(userText, replyNote = "") {
         const startedAt = Date.now();
         const raw = mode === "api" ? await apiTurn(notes, replyNote, images) : await claudeCodeTurn(notes, replyNote, images);
         // How long the brain took, for the debug meter: the part of "กำลังพิมพ์..." that is really waiting
-        lastUsage = { ...(lastUsage ?? {}), ms: Date.now() - startedAt };
+        me.lastUsage = { ...(me.lastUsage ?? {}), ms: Date.now() - startedAt };
         if (turnImageNote) me.transcript.at(-1).text = plain.replace("[ผู้ใช้ส่งรูปมา]", `[ผู้ใช้ส่งรูป: ${turnImageNote}]`);
         // No typos when the user seems to be hurting; a "*fix" there would feel careless
         const isSerious = /เศร้า|ร้องไห้|ไม่ไหว|อยากตาย|ไม่อยากอยู่|ทำร้ายตัวเอง|เครียดมาก|ป่วย|โรงพยาบาล/.test(userText);
@@ -765,7 +770,7 @@ export function onProfileSwitch() {
 }
 
 /** Size of what was sent last turn, for the debug meter */
-export const promptStats = () => (lastPrompt ? { ...lastPrompt, usage: lastUsage } : null);
+export const promptStats = () => (me.lastPrompt ? { ...me.lastPrompt, usage: me.lastUsage } : null);
 
 /** When she last spoke and last read, used to decide if she's still "holding the phone" */
 export const presence = () => ({ lastAgentAt: me.lastAgentAt, lastReadAt: me.lastReadAt, lastUserAt: me.lastUserAt });

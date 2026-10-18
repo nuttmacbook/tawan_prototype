@@ -86,7 +86,7 @@ export async function remember(topic, fact) {
     let outcome = "new";
     await updateText(FILES.memory, (text) => {
         const lines = text.split("\n");
-        const match = findSameFact(lines, cleanFact);
+        const match = findSameFact(lines, cleanFact, cleanTopic);
         outcome = match.kind;
         if (match.kind === "known") return null;
         // The newer wording wins: it's either more detailed or the same fact said again with today's date
@@ -109,27 +109,53 @@ const isNegative = (text) => /ไม่|เลิก|ห้าม|ยังไ�
 // Close enough to be the same fact in other words; kept high so two different likes stay two lines
 const SAME_FACT = 0.85;
 
+// Containment only counts when the shorter text is most of the longer one:
+// "ชอบแมว" inside "แฟนชอบแมว" is about someone else, not the same fact
+const MIN_CONTAINED_SHARE = 0.6;
+
+const digitsOf = (text) => (String(text ?? "").match(/\d+/g) ?? []).join(",");
+
+/** Every number in the shorter text appears whole in the longer one ("วันที่ 1" is not part of "วันที่ 12") */
+const numbersFit = (shorter, longer) => {
+    const have = new Set(String(longer ?? "").match(/\d+/g) ?? []);
+    return (String(shorter ?? "").match(/\d+/g) ?? []).every((n) => have.has(n));
+};
+
 /**
  * Looks for this fact among the remembered ones, so she doesn't write "ชอบชาบู" five times.
+ * Only the same topic is compared, except a word-for-word repeat, which moves the fact to the new topic.
  * @returns {{ kind: "new" | "known" | "replace", indexes: number[] }}
  *   known: an existing line already says all of it · replace: these lines say less or the same, differently
  */
-function findSameFact(lines, fact) {
+function findSameFact(lines, fact, topic) {
     const plain = normalize(fact);
     const indexes = [];
+    let section = "";
     for (const [ i, line ] of lines.entries()) {
+        if (line.startsWith("## ")) section = line.slice(3).trim();
         if (!line.startsWith("- ")) continue;
         const old = line.replace(/^- (\[\d{4}-\d{2}-\d{2}\]\s*)?/, "");
         const oldPlain = normalize(old);
         if (!oldPlain) continue;
-        const contains = oldPlain.includes(plain) || plain.includes(oldPlain);
+        if (oldPlain === plain) {
+            indexes.push(i);
+            continue;
+        }
+        if (section !== topic) continue;
+        const [ shorter, longer ] = oldPlain.length < plain.length ? [ oldPlain, plain ] : [ plain, oldPlain ];
+        const [ shortText, longText ] = oldPlain.length < plain.length ? [ old, fact ] : [ fact, old ];
+        // Same start = the same fact told in more detail ("ชอบกินชาบู" → "ชอบกินชาบูร้านใกล้บ้าน");
+        // anywhere else it must be most of the text, so "ชอบแมว" in "แฟนชอบแมว" doesn't count
+        const contains = numbersFit(shortText, longText)
+            && (longer.startsWith(shorter) || (longer.includes(shorter) && Array.from(shorter).length / Array.from(longer).length >= MIN_CONTAINED_SHARE));
         // "มีแมว" sits inside "ไม่มีแมว", but it's the opposite: the newer one is what's true now
         if (contains && isNegative(old) !== isNegative(fact)) {
             indexes.push(i);
             continue;
         }
-        if (oldPlain !== plain && oldPlain.includes(plain)) return { kind: "known", indexes: [] };
-        if (oldPlain === plain || plain.includes(oldPlain) || similarity(old, fact) >= SAME_FACT) indexes.push(i);
+        if (contains && oldPlain.includes(plain)) return { kind: "known", indexes: [] };
+        // Same wording but different numbers ("สอบวันที่ 5" / "สอบวันที่ 12") are different facts
+        if (contains || (similarity(old, fact) >= SAME_FACT && digitsOf(old) === digitsOf(fact))) indexes.push(i);
     }
     return { kind: indexes.length ? "replace" : "new", indexes };
 }
