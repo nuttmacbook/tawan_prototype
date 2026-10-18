@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile, readdir, rename, cp, rm, stat, link, copyFi
 import { AsyncLocalStorage } from "node:async_hooks";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { withFileLock, writeAtomic } from "./fsutil.js";
+import { withFileLock, writeAtomic, readText as readFileText } from "./fsutil.js";
 
 /* ------------------------------------ layout */
 
@@ -87,10 +87,14 @@ export async function loadSettings() {
     }
 }
 
+/**
+ * @param {object | ((current: object) => object)} patch fields to set; a function gets the
+ *   settings read inside the lock, for changes that build on what's already there
+ */
 export function saveSettings(patch) {
     return withFileLock(SETTINGS_FILE, async () => {
         const current = await loadSettings();
-        const next = { ...current, ...patch };
+        const next = { ...current, ...(typeof patch === "function" ? patch(current) : patch) };
         await mkdir(DATA_DIR, { recursive: true });
         // Keep the previous good version next to it, in case this one is ever damaged
         if (Object.keys(current).length) await writeAtomic(SETTINGS_BACKUP, `${JSON.stringify(current, null, 4)}\n`);
@@ -307,13 +311,21 @@ export async function restoreSnapshot(id) {
     // The safety copy must not push the one we're restoring out of the list
     const safety = await snapshot(`ก่อนย้อนกลับไป ${name}`, { keep: name });
 
+    // Through the same file locks as every other writer, so "remember" or a hand edit
+    // arriving mid-restore can't interleave with it
     for (const n of MD_FILES) {
         const from = path.join(dir, `${n}.md`);
-        if (await exists(from)) await cp(from, fileOf(n));
+        if (!(await exists(from))) continue;
+        const text = await readFileText(from);
+        await withFileLock(fileOf(n), () => writeAtomic(fileOf(n), text));
     }
     if (await exists(path.join(dir, "history"))) {
-        await rm(path.join(activeDir(), "history"), { recursive: true, force: true });
-        await cp(path.join(dir, "history"), path.join(activeDir(), "history"), { recursive: true });
+        // Today's log is the only history file anything else writes to
+        const todayLog = path.join(activeDir(), "history", `${today()}.md`);
+        await withFileLock(todayLog, async () => {
+            await rm(path.join(activeDir(), "history"), { recursive: true, force: true });
+            await cp(path.join(dir, "history"), path.join(activeDir(), "history"), { recursive: true });
+        });
     }
     return safety;
 }

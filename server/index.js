@@ -118,10 +118,10 @@ const mergeReplies = (list) => {
  */
 async function replyToPending(ids, context = {}) {
     const wanted = [ ...new Set((Array.isArray(ids) ? ids : []).map(String)) ];
-    const running = [ ...new Set(wanted.map((id) => inFlight.get(id)).filter(Boolean)) ];
-    const earlier = (await Promise.allSettled(running)).filter((r) => r.status === "fulfilled").map((r) => r.value);
 
-    // Claimed synchronously, before any await, so two calls can't both take the same message
+    // Everything up to inFlight.set runs with no await in between, so two calls arriving
+    // together can't both take the same message: the second one waits for the first one's answer
+    const running = [ ...new Set(wanted.map((id) => inFlight.get(id)).filter(Boolean)) ];
     const mine = wanted.filter((id) => !inFlight.has(id));
     let settle;
     const job = new Promise((resolve, reject) => (settle = { resolve, reject }));
@@ -130,15 +130,24 @@ async function replyToPending(ids, context = {}) {
 
     let items = [];
     try {
+        const settled = await Promise.allSettled(running);
+        const earlier = settled.filter((r) => r.status === "fulfilled").map((r) => r.value);
+        const failed = settled.find((r) => r.status === "rejected");
+
         items = await store.takePending(mine);
         if (!items.length) {
+            // The answer this call waited for failed: report that instead of trying again at once,
+            // which would call Claude twice for one failure (the closed-chat scheduler backs off)
+            if (failed && !earlier.length) throw failed.reason;
             settle.resolve(EMPTY_REPLY);
             return mergeReplies(earlier);
         }
         const result = await chat(items, context);
         await store.removePending(items.map((m) => m.id));
-        // Unsent while she was typing: it's in the log now, so take it back there
-        for (const m of items.filter((x) => unsendAfter.has(x.id))) {
+        // Unsent while she was typing: it's in the log now, so take it back there.
+        // Checked again after each one, since another take-back can arrive during the loop.
+        for (let m = items.find((x) => unsendAfter.has(x.id)); m; m = items.find((x) => unsendAfter.has(x.id))) {
+            unsendAfter.delete(m.id);
             await store.unsendFromHistory(m.text, clockOf(m.sentAt));
             noteUnsent(m.text);
         }
@@ -189,12 +198,13 @@ async function maybeTidyMemory() {
     isTidying = true;
     try {
         if ((await store.readMemoryFile()).length < AUTO_TIDY_CHARS) return;
-        const id = profiles.getActiveId();
+        // The character this reply belonged to, even if you've switched since
+        const id = profiles.currentId();
         const today = new Date().toLocaleDateString("sv-SE");
-        const settings = await store.loadSettings();
-        if (settings?.lastTidy?.[id] === today) return;
+        if ((await store.loadSettings())?.lastTidy?.[id] === today) return;
 
-        await store.saveSettings({ lastTidy: { ...(settings?.lastTidy ?? {}), [id]: today } });
+        // Merged inside the settings lock, so another character's date can't be dropped
+        await store.saveSettings((current) => ({ lastTidy: { ...(current?.lastTidy ?? {}), [id]: today } }));
         await profiles.snapshot("ก่อนจัดระเบียบความจำอัตโนมัติ");
         const result = await compactMemory();
         if (result) console.log(`  🧹 จัดระเบียบความจำอัตโนมัติ: ${result.before} → ${result.after} บรรทัด`);
@@ -706,6 +716,7 @@ async function handleRequest(req, res) {
         return send(res, 400, { error: "bad request" });
     }
     if (!isKnownHost(req)) {
+        console.log(`  ⚠ ปฏิเสธคำขอจากชื่อ host ที่ไม่รู้จัก: ${String(req.headers.host ?? "").slice(0, 100)} (ถ้าเป็นของคุณ ใส่ใน ALLOWED_HOSTS)`);
         res.writeHead(421, { "content-type": "text/plain; charset=utf-8" });
         return res.end("unknown host");
     }

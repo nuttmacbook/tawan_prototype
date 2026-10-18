@@ -559,7 +559,8 @@ export async function pastHistoryFiles() {
 /** Moves a summarized day out of the way; the raw log is kept, only the prompt stops reading it */
 export async function archiveHistory(file) {
     await mkdir(archiveDir(), { recursive: true });
-    await rename(file, path.join(archiveDir(), path.basename(file)));
+    // Locked like every write to a day log, so a take-back can't re-create the file after it moved
+    await withFileLock(file, () => rename(file, path.join(archiveDir(), path.basename(file))));
 }
 
 /* ------------------------------------ search */

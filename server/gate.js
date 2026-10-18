@@ -31,6 +31,16 @@ export const lanAddresses = () =>
         .filter((a) => a && a.family === "IPv4" && !a.internal)
         .map((a) => a.address);
 
+/** Every name a phone on the same Wi-Fi might use: IPv4, IPv6 and this computer's name */
+export const lanNames = () => {
+    const v6 = Object.values(os.networkInterfaces())
+        .flat()
+        .filter((a) => a && a.family === "IPv6" && !a.internal)
+        .map((a) => `[${a.address.split("%")[0].toLowerCase()}]`);
+    const host = os.hostname().toLowerCase();
+    return [ ...lanAddresses(), ...v6, host, `${host}.local`, `${host}.lan` ];
+};
+
 /* ------------------------------------ requests from other websites */
 
 /** "Example.com:3939" → "example.com", "[::1]:3939" → "[::1]" */
@@ -46,7 +56,7 @@ export const hostNameOf = (host) => {
  * @param {{ isLan?: boolean, isQuickTunnel?: boolean, publicUrl?: string, extraHosts?: string[], lanNames?: () => string[] }} options
  * @returns {(req: import("node:http").IncomingMessage) => boolean}
  */
-export function makeHostCheck({ isLan = false, isQuickTunnel = false, publicUrl = "", extraHosts = [], lanNames = lanAddresses } = {}) {
+export function makeHostCheck({ isLan = false, isQuickTunnel = false, publicUrl = "", extraHosts = [], lanNames: names = lanNames } = {}) {
     let publicHost = "";
     try {
         publicHost = publicUrl ? new URL(publicUrl).hostname.toLowerCase() : "";
@@ -54,7 +64,7 @@ export function makeHostCheck({ isLan = false, isQuickTunnel = false, publicUrl 
     const extra = extraHosts.map((h) => String(h).trim().toLowerCase()).filter(Boolean);
     let cache = { at: 0, list: [] };
     const lan = () => {
-        if (Date.now() - cache.at > 60000) cache = { at: Date.now(), list: lanNames() };
+        if (Date.now() - cache.at > 60000) cache = { at: Date.now(), list: names() };
         return cache.list;
     };
 

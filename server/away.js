@@ -1,6 +1,6 @@
 import { loadState } from "./mood.js";
 import { planReply } from "./pacing.js";
-import { loadSettings, saveSettings, getActiveId, pinProfile } from "./profiles.js";
+import { loadSettings, saveSettings, currentId, pinProfile } from "./profiles.js";
 
 /* ------------------------------------ config */
 
@@ -105,7 +105,7 @@ export function startAwayScheduler(send, deps) {
             if (deps && (await answerWhileClosed(deps))) return;
             if (!(AWAY_HOURS > 0) || Math.random() > CHANCE_PER_CHECK) return;
 
-            const id = getActiveId();
+            const id = currentId();
             const settings = await loadSettings();
             const log = settings?.awayPings?.[id] ?? {};
             const count = log.date === today() ? Number(log.count ?? 0) : 0;
@@ -126,10 +126,9 @@ export function startAwayScheduler(send, deps) {
             if (!result?.bubbles?.length) return;
             await deps?.onAgentMessage?.(result.bubbles);
             // Read again: other settings may have changed while she was writing
-            const latest = await loadSettings();
-            await saveSettings({
+            await saveSettings((latest) => ({
                 awayPings: { ...(latest?.awayPings ?? {}), [id]: { date: today(), count: count + 1, lastAt: Date.now() } },
-            });
+            }));
             console.log(`  ✉ ${result.bubbles.join(" / ")}`);
         } catch (err) {
             console.error("away message failed:", err?.message ?? err);

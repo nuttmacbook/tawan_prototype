@@ -28,6 +28,20 @@ export function withFileLock(key, fn) {
 
 /* ------------------------------------ crash-safe writes */
 
+// Windows refuses to replace a file that antivirus or the search indexer has open for a moment
+const BUSY = new Set([ "EPERM", "EACCES", "EBUSY" ]);
+
+async function renameWithRetry(from, to) {
+    for (let attempt = 0; ; attempt++) {
+        try {
+            return await rename(from, to);
+        } catch (err) {
+            if (!BUSY.has(err?.code) || attempt >= 5) throw err;
+            await new Promise((r) => setTimeout(r, 20 * 2 ** attempt));
+        }
+    }
+}
+
 /**
  * Writes to a temporary file first and then renames it over the target.
  * A crash or power cut mid-write leaves either the old file or the new one, never half of each.
@@ -38,7 +52,7 @@ export async function writeAtomic(file, data) {
     const tmp = `${file}.${process.pid}-${crypto.randomBytes(4).toString("hex")}.tmp`;
     try {
         await writeFile(tmp, data);
-        await rename(tmp, file);
+        await renameWithRetry(tmp, file);
     } catch (err) {
         await rm(tmp, { force: true }).catch(() => {});
         throw err;
