@@ -7,7 +7,8 @@
     "scripts": {
         "dev": "node scripts/run.js",
         "build": "vite build",
-        "start": "vite build && node scripts/run.js --prod"
+        "start": "vite build && node scripts/run.js --prod",
+        "test": "node --test"
     },
     "engines": {
         "node": ">=20.12"

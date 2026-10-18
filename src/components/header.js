@@ -121,13 +121,13 @@ const profileMenu = (state) => {
             <p class="px-2 pb-1 pt-1 ${EYEBROW}">แชท</p>
             ${list.map((p) => /*html*/`
                 <div class="flex items-center gap-1">
-                    <button type="button" onclick="switchProfile('${esc(p.id)}')"
+                    <button type="button" data-id="${esc(p.id)}" onclick="switchProfile(this.dataset.id)"
                         class="flex min-w-0 flex-1 items-center gap-2.5 rounded-xl px-2 py-2 text-left text-sm transition hover:bg-white/5 ${p.id === state?.profileId ? "bg-sky-500/10 ring-1 ring-inset ring-sky-400/30" : ""}">
                         <span class="grid h-8 w-8 shrink-0 place-items-center rounded-xl bg-gradient-to-br from-pink-400 to-sky-500 text-sm font-bold text-slate-950">${initial(p.name)}</span>
                         <span class="truncate text-white">${esc(p.name)}</span>
                         ${p.id === state?.profileId ? `<span class="ml-auto text-xs text-sky-300">✓</span>` : ""}
                     </button>
-                    ${p.id === state?.profileId ? "" : `<button type="button" data-debug onclick="deleteProfile('${esc(p.id)}', '${esc(p.name)}')" class="rounded-lg px-2 py-1 text-xs text-rose-300/70 hover:bg-rose-500/10 hover:text-rose-200" aria-label="ลบ ${esc(p.name)}">ลบ</button>`}
+                    ${p.id === state?.profileId ? "" : `<button type="button" data-debug data-id="${esc(p.id)}" data-name="${esc(p.name)}" onclick="deleteProfile(this.dataset.id, this.dataset.name)" class="rounded-lg px-2 py-1 text-xs text-rose-300/70 hover:bg-rose-500/10 hover:text-rose-200" aria-label="ลบ ${esc(p.name)}">ลบ</button>`}
                 </div>
             `).join("")}
             <button type="button" onclick="createProfile(false)" class="w-full rounded-xl px-2 py-2 text-left text-sm text-sky-300 hover:bg-white/5">+ ตัวละครใหม่</button>

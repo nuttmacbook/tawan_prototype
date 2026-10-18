@@ -1,6 +1,8 @@
-import { mkdir, readFile, writeFile, readdir, rename, cp, rm, stat } from "node:fs/promises";
+import { mkdir, readFile, writeFile, readdir, rename, cp, rm, stat, link, copyFile } from "node:fs/promises";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { withFileLock, writeAtomic, readText as readFileText } from "./fsutil.js";
 
 /* ------------------------------------ layout */
 
@@ -9,12 +11,16 @@ import path from "node:path";
 // ├── .snapshots/<id>/    automatic and manual backups of a character's data
 // ├── .trash/             deleted characters (moved, never erased)
 // └── settings.json       brain, active character, phone key — shared by all characters
-const DATA_DIR = fileURLToPath(new URL("../data/", import.meta.url));
+// PERSONA_DATA_DIR lets tests run against a scratch folder instead of your real characters
+const DATA_DIR = process.env.PERSONA_DATA_DIR
+    ? `${path.resolve(process.env.PERSONA_DATA_DIR)}${path.sep}`
+    : fileURLToPath(new URL("../data/", import.meta.url));
 const PERSONAS_DIR = path.join(DATA_DIR, "personas");
 const SNAP_DIR = path.join(DATA_DIR, ".snapshots");
 const TRASH_DIR = path.join(DATA_DIR, ".trash");
 const TEMPLATE_DIR = fileURLToPath(new URL("./templates/", import.meta.url));
 const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
+const SETTINGS_BACKUP = path.join(DATA_DIR, "settings.json.bak");
 
 const MD_FILES = [ "persona", "style", "teachings", "memory", "state", "threads", "diary", "journal" ];
 // What a copied character keeps; everything about the relationship starts fresh
@@ -53,26 +59,69 @@ const safeId = (id) => {
     return clean;
 };
 
+/** Unique even when two characters are made in the same millisecond */
+const newId = () => `p${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
+
 /* ------------------------------------ settings */
 
+async function parseSettings(file) {
+    const text = await readFile(file, "utf8");
+    const value = JSON.parse(text);
+    return value && typeof value === "object" ? value : {};
+}
+
+/**
+ * Settings hold the phone key and the push keys, so a broken file must not quietly become {}:
+ * that would hand out a new key and disconnect every phone. The last good copy is used instead.
+ */
 export async function loadSettings() {
     try {
-        return JSON.parse(await readFile(SETTINGS_FILE, "utf8")) ?? {};
-    } catch {
-        return {};
+        return await parseSettings(SETTINGS_FILE);
+    } catch (err) {
+        if (err?.code === "ENOENT") return {};
+        try {
+            return await parseSettings(SETTINGS_BACKUP);
+        } catch {
+            return {};
+        }
     }
 }
 
-export async function saveSettings(patch) {
-    const next = { ...(await loadSettings()), ...patch };
-    await mkdir(DATA_DIR, { recursive: true });
-    await writeFile(SETTINGS_FILE, `${JSON.stringify(next, null, 4)}\n`);
-    return next;
+/**
+ * @param {object | ((current: object) => object)} patch fields to set; a function gets the
+ *   settings read inside the lock, for changes that build on what's already there
+ */
+export function saveSettings(patch) {
+    return withFileLock(SETTINGS_FILE, async () => {
+        const current = await loadSettings();
+        const next = { ...current, ...(typeof patch === "function" ? patch(current) : patch) };
+        await mkdir(DATA_DIR, { recursive: true });
+        // Keep the previous good version next to it, in case this one is ever damaged
+        if (Object.keys(current).length) await writeAtomic(SETTINGS_BACKUP, `${JSON.stringify(current, null, 4)}\n`);
+        await writeAtomic(SETTINGS_FILE, `${JSON.stringify(next, null, 4)}\n`);
+        return next;
+    });
 }
 
 /* ------------------------------------ active character */
 
-export const activeDir = () => path.join(PERSONAS_DIR, activeId || "_none");
+// A reply can take a minute. If you switch characters meanwhile, everything that reply
+// writes must still land in the character it belongs to, so work runs "pinned" to one id.
+const pinned = new AsyncLocalStorage();
+
+/** The character this piece of work belongs to: the pinned one, or the one on screen */
+export const currentId = () => pinned.getStore() ?? activeId;
+
+/**
+ * Runs fn with every file path fixed to one character, whatever happens to the active one meanwhile.
+ * @template T
+ * @param {() => Promise<T>} fn
+ * @param {string} [id] defaults to the character active right now
+ * @returns {Promise<T>}
+ */
+export const pinProfile = (fn, id = currentId()) => pinned.run(id, fn);
+
+export const activeDir = () => path.join(PERSONAS_DIR, currentId() || "_none");
 export const getActiveId = () => activeId;
 export const fileOf = (name) => path.join(activeDir(), `${name}.md`);
 
@@ -91,7 +140,7 @@ async function fillMissing(dir) {
  */
 async function migrateLegacy() {
     if (!(await exists(path.join(DATA_DIR, "persona.md")))) return null;
-    const id = (await exists(path.join(PERSONAS_DIR, "mali"))) ? `p${Date.now().toString(36)}` : "mali";
+    const id = (await exists(path.join(PERSONAS_DIR, "mali"))) ? newId() : "mali";
     const dir = path.join(PERSONAS_DIR, id);
     await mkdir(dir, { recursive: true });
 
@@ -146,7 +195,7 @@ export async function listProfiles() {
  * @returns {Promise<string>} new id
  */
 export async function createProfile({ name = "", copyFrom = "" } = {}) {
-    const id = `p${Date.now().toString(36)}`;
+    const id = newId();
     const dir = path.join(PERSONAS_DIR, id);
     await mkdir(dir, { recursive: true });
 
@@ -159,7 +208,7 @@ export async function createProfile({ name = "", copyFrom = "" } = {}) {
     }
     await fillMissing(dir);
 
-    const cleanName = String(name ?? "").trim().slice(0, 40);
+    const cleanName = String(name ?? "").trim().replace(/[\r\n]+/g, " ").slice(0, 40);
     if (cleanName) {
         const file = path.join(dir, "persona.md");
         const text = await readText(file);
@@ -172,7 +221,7 @@ export async function switchProfile(id) {
     const clean = safeId(id);
     if (!(await exists(path.join(PERSONAS_DIR, clean)))) throw new Error("ไม่พบตัวละครนี้");
     activeId = clean;
-    await fillMissing(activeDir());
+    await fillMissing(path.join(PERSONAS_DIR, clean));
     await saveSettings({ activePersona: clean });
     return clean;
 }
@@ -187,13 +236,37 @@ export async function deleteProfile(id) {
 
 /* ------------------------------------ snapshots */
 
-const snapRoot = () => path.join(SNAP_DIR, activeId);
+const snapRoot = () => path.join(SNAP_DIR, currentId());
+
+/**
+ * Copies a history folder. Archived days never change once archived, so they are hard-linked
+ * instead of copied: 30 snapshots then cost about one copy of the archive, not thirty.
+ */
+async function copyHistory(from, to) {
+    await mkdir(to, { recursive: true });
+    for (const e of await readdir(from, { withFileTypes: true }).catch(() => [])) {
+        const src = path.join(from, e.name);
+        const dst = path.join(to, e.name);
+        if (e.isDirectory() && e.name === "archive") {
+            await mkdir(dst, { recursive: true });
+            for (const f of await readdir(src).catch(() => [])) {
+                await link(path.join(src, f), path.join(dst, f)).catch(() => copyFile(path.join(src, f), path.join(dst, f)));
+            }
+        } else if (e.isDirectory()) {
+            await cp(src, dst, { recursive: true });
+        } else {
+            await copyFile(src, dst);
+        }
+    }
+}
 
 /**
  * Copies the active character's md files and chat history (not uploaded pictures).
+ * @param {string} [label]
+ * @param {{ keep?: string }} [options] keep: a snapshot id that must survive the clean-up
  * @returns {Promise<string>} snapshot id
  */
-export async function snapshot(label = "") {
+export async function snapshot(label = "", { keep = "" } = {}) {
     const id = `${stamp()}-${Math.random().toString(36).slice(2, 5)}`;
     const dir = path.join(snapRoot(), id);
     await mkdir(dir, { recursive: true });
@@ -202,12 +275,12 @@ export async function snapshot(label = "") {
         if (await exists(from)) await cp(from, path.join(dir, `${name}.md`));
     }
     if (await exists(path.join(activeDir(), "history"))) {
-        await cp(path.join(activeDir(), "history"), path.join(dir, "history"), { recursive: true });
+        await copyHistory(path.join(activeDir(), "history"), path.join(dir, "history"));
     }
     await writeFile(path.join(dir, "_label.txt"), String(label).slice(0, 200));
 
-    const all = (await listSnapshots()).map((s) => s.id);
-    for (const old of all.slice(KEEP_SNAPSHOTS)) await rm(path.join(snapRoot(), old), { recursive: true, force: true });
+    const old = (await listSnapshots()).map((s) => s.id).filter((s) => s !== keep).slice(KEEP_SNAPSHOTS);
+    for (const o of old) await rm(path.join(snapRoot(), o), { recursive: true, force: true });
     return id;
 }
 
@@ -232,17 +305,27 @@ export async function dailySnapshot() {
  * @returns {Promise<string>} id of the safety snapshot taken before restoring
  */
 export async function restoreSnapshot(id) {
-    const dir = path.join(snapRoot(), path.basename(String(id ?? "")));
-    if (!(await exists(dir))) throw new Error("ไม่พบจุดสำรองนี้");
-    const safety = await snapshot(`ก่อนย้อนกลับไป ${id}`);
+    const name = path.basename(String(id ?? ""));
+    const dir = path.join(snapRoot(), name);
+    if (!name || !(await exists(dir))) throw new Error("ไม่พบจุดสำรองนี้");
+    // The safety copy must not push the one we're restoring out of the list
+    const safety = await snapshot(`ก่อนย้อนกลับไป ${name}`, { keep: name });
 
-    for (const name of MD_FILES) {
-        const from = path.join(dir, `${name}.md`);
-        if (await exists(from)) await cp(from, fileOf(name));
+    // Through the same file locks as every other writer, so "remember" or a hand edit
+    // arriving mid-restore can't interleave with it
+    for (const n of MD_FILES) {
+        const from = path.join(dir, `${n}.md`);
+        if (!(await exists(from))) continue;
+        const text = await readFileText(from);
+        await withFileLock(fileOf(n), () => writeAtomic(fileOf(n), text));
     }
     if (await exists(path.join(dir, "history"))) {
-        await rm(path.join(activeDir(), "history"), { recursive: true, force: true });
-        await cp(path.join(dir, "history"), path.join(activeDir(), "history"), { recursive: true });
+        // Today's log is the only history file anything else writes to
+        const todayLog = path.join(activeDir(), "history", `${today()}.md`);
+        await withFileLock(todayLog, async () => {
+            await rm(path.join(activeDir(), "history"), { recursive: true, force: true });
+            await cp(path.join(dir, "history"), path.join(activeDir(), "history"), { recursive: true });
+        });
     }
     return safety;
 }

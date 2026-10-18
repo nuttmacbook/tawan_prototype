@@ -1,5 +1,4 @@
 import http from "node:http";
-import os from "node:os";
 import crypto from "node:crypto";
 import { readFile, stat, rm } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
@@ -10,9 +9,12 @@ try {
     process.loadEnvFile();
 } catch {}
 
+// A bug in one request must never take the whole app down; log it and keep serving
+process.on("unhandledRejection", (err) => console.error("unhandled:", err?.stack ?? err));
+
 const {
     chat, greet, nudge, warmUp, resetSession, personaName, brainMode, consolidateHistory, compactMemory, hasApiKey, presence,
-    addReaction, awayPing, onProfileSwitch, noteUnsent, promptStats,
+    addReaction, awayPing, switchExclusive, noteUnsent, promptStats,
 } = await import("./brain.js");
 const profiles = await import("./profiles.js");
 const away = await import("./away.js");
@@ -25,6 +27,7 @@ const store = await import("./store.js");
 const { loadState, describeMood, stageOf, agoText } = await import("./mood.js");
 const { loadThreads } = await import("./life.js");
 const { claudeCodeStatus, API_MODEL, CC_MODEL } = await import("./llm.js");
+const { isLocal, clientIp, isHttps, lanAddresses, makeHostCheck, isOwnPage } = await import("./gate.js");
 
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
 const DIST = path.join(ROOT, "dist");
@@ -42,12 +45,19 @@ const send = (res, status, body) => {
     res.end(JSON.stringify(body));
 };
 
+/**
+ * Collects the raw bytes first and decodes once at the end: decoding chunk by chunk
+ * breaks Thai characters that happen to fall across two chunks into "�".
+ */
 async function readBody(req, limit = 2_000_000) {
-    let raw = "";
+    const chunks = [];
+    let size = 0;
     for await (const chunk of req) {
-        raw += chunk;
-        if (raw.length > limit) throw new Error("ข้อมูลใหญ่เกินไป");
+        size += chunk.length;
+        if (size > limit) throw new Error("ข้อมูลใหญ่เกินไป");
+        chunks.push(chunk);
     }
+    const raw = Buffer.concat(chunks).toString("utf8");
     try {
         return raw ? JSON.parse(raw) : {};
     } catch {
@@ -88,28 +98,74 @@ async function brainPayload(force = false) {
     };
 }
 
+const EMPTY_REPLY = { bubbles: [], notes: [] };
+
+/** Several replies as one, for a request that waited on an answer already being written */
+const mergeReplies = (list) => {
+    const done = list.filter(Boolean);
+    return {
+        ...(done.at(-1) ?? EMPTY_REPLY),
+        bubbles: done.flatMap((r) => r?.bubbles ?? []),
+        notes: done.flatMap((r) => r?.notes ?? []),
+    };
+};
+
 /**
  * Answers the given pending messages and only then removes them from the queue,
  * so a failed reply leaves them waiting to be retried.
+ * A message already being answered (by the closed-chat scheduler, or a retry) is never answered twice:
+ * this call waits for that answer and returns it instead.
  */
 async function replyToPending(ids, context = {}) {
-    const items = await store.takePending(ids);
-    if (!items.length) return { bubbles: [], notes: [] };
-    items.forEach((m) => inFlight.add(m.id));
+    const wanted = [ ...new Set((Array.isArray(ids) ? ids : []).map(String)) ];
+
+    // Everything up to inFlight.set runs with no await in between, so two calls arriving
+    // together can't both take the same message: the second one waits for the first one's answer
+    const running = [ ...new Set(wanted.map((id) => inFlight.get(id)).filter(Boolean)) ];
+    const mine = wanted.filter((id) => !inFlight.has(id));
+    let settle;
+    const job = new Promise((resolve, reject) => (settle = { resolve, reject }));
+    job.catch(() => {});
+    mine.forEach((id) => inFlight.set(id, job));
+
+    let items = [];
     try {
+        const settled = await Promise.allSettled(running);
+        const earlier = settled.filter((r) => r.status === "fulfilled").map((r) => r.value);
+        const failed = settled.find((r) => r.status === "rejected");
+
+        items = await store.takePending(mine);
+        if (!items.length) {
+            // The answer this call waited for failed: report that instead of trying again at once,
+            // which would call Claude twice for one failure (the closed-chat scheduler backs off)
+            if (failed && !earlier.length) throw failed.reason;
+            settle.resolve(EMPTY_REPLY);
+            return mergeReplies(earlier);
+        }
         const result = await chat(items, context);
         await store.removePending(items.map((m) => m.id));
-        // Unsent while she was typing: it's in the log now, so take it back there
-        for (const m of items.filter((x) => unsendAfter.has(x.id))) {
+        // Unsent while she was typing: it's in the log now, so take it back there.
+        // Checked again after each one, since another take-back can arrive during the loop.
+        for (let m = items.find((x) => unsendAfter.has(x.id)); m; m = items.find((x) => unsendAfter.has(x.id))) {
+            unsendAfter.delete(m.id);
             await store.unsendFromHistory(m.text, clockOf(m.sentAt));
             noteUnsent(m.text);
-            unsendAfter.delete(m.id);
         }
         maybeTidyMemory();
         if (result?.bubbles?.length && !away.isBeingViewed()) pushMessage(result.bubbles);
-        return result;
+        settle.resolve(result);
+        return mergeReplies([ ...earlier, result ]);
+    } catch (err) {
+        // The reply failed, but a message the user took back meanwhile should still go away
+        const taken = items.filter((m) => unsendAfter.has(m.id)).map((m) => m.id);
+        if (taken.length) await store.removePending(taken).catch(() => {});
+        settle.reject(err);
+        throw err;
     } finally {
-        items.forEach((m) => inFlight.delete(m.id));
+        items.forEach((m) => unsendAfter.delete(m.id));
+        mine.forEach((id) => {
+            if (inFlight.get(id) === job) inFlight.delete(id);
+        });
     }
 }
 
@@ -122,7 +178,8 @@ async function pushMessage(bubbles) {
     }
 }
 
-const inFlight = new Set();
+/** Message id → the reply currently being written for it */
+const inFlight = new Map();
 const unsendAfter = new Set();
 const clockOf = (t) => new Date(t).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
 
@@ -137,15 +194,17 @@ let isTidying = false;
  */
 async function maybeTidyMemory() {
     if (!AUTO_TIDY_CHARS || isTidying) return;
+    // Set before the first await, so two replies finishing together can't both start a tidy-up
+    isTidying = true;
     try {
         if ((await store.readMemoryFile()).length < AUTO_TIDY_CHARS) return;
-        const id = profiles.getActiveId();
+        // The character this reply belonged to, even if you've switched since
+        const id = profiles.currentId();
         const today = new Date().toLocaleDateString("sv-SE");
-        const settings = await store.loadSettings();
-        if (settings?.lastTidy?.[id] === today) return;
+        if ((await store.loadSettings())?.lastTidy?.[id] === today) return;
 
-        isTidying = true;
-        await store.saveSettings({ lastTidy: { ...(settings?.lastTidy ?? {}), [id]: today } });
+        // Merged inside the settings lock, so another character's date can't be dropped
+        await store.saveSettings((current) => ({ lastTidy: { ...(current?.lastTidy ?? {}), [id]: today } }));
         await profiles.snapshot("ก่อนจัดระเบียบความจำอัตโนมัติ");
         const result = await compactMemory();
         if (result) console.log(`  🧹 จัดระเบียบความจำอัตโนมัติ: ${result.before} → ${result.after} บรรทัด`);
@@ -159,6 +218,9 @@ async function maybeTidyMemory() {
 /* ------------------------------------ routes */
 
 const routes = {
+    // scripts/run.js asks this after a restart: if it fails, the new code is rolled back
+    "GET /api/health": async () => ({ ok: true, name: await personaName(), status: await statusPayload() }),
+
     "GET /api/bootstrap": async (_, url, req) => ({
         name: await personaName(),
         profileId: profiles.getActiveId(),
@@ -207,9 +269,8 @@ const routes = {
 
     "POST /api/profiles/import": async (body) => {
         const { id, name } = await portable.importProfile(body?.pack);
-        await profiles.switchProfile(id);
+        await switchExclusive(() => profiles.switchProfile(id));
         clearActivity();
-        await onProfileSwitch();
         return { id, name };
     },
 
@@ -222,16 +283,15 @@ const routes = {
 
     "POST /api/profiles/create": async (body) => {
         const id = await profiles.createProfile({ name: body?.name, copyFrom: body?.copy ? profiles.getActiveId() : "" });
-        await profiles.switchProfile(id);
+        await switchExclusive(() => profiles.switchProfile(id));
         clearActivity();
-        await onProfileSwitch();
         return { id };
     },
 
+    // Waits for a reply that is still being written, so it is saved to the character it belongs to
     "POST /api/profiles/switch": async (body) => {
-        await profiles.switchProfile(body?.id);
+        await switchExclusive(() => profiles.switchProfile(body?.id));
         clearActivity();
-        await onProfileSwitch();
         return { id: profiles.getActiveId() };
     },
 
@@ -250,8 +310,7 @@ const routes = {
     },
 
     "POST /api/snapshots/restore": async (body) => {
-        await profiles.restoreSnapshot(body?.id);
-        await onProfileSwitch();
+        await switchExclusive(() => profiles.restoreSnapshot(body?.id));
         return { snapshots: await profiles.listSnapshots() };
     },
 
@@ -418,8 +477,22 @@ const routes = {
 // Changing the system's code is only allowed from this computer, never from a phone on the network
 const LOCAL_ONLY = /^\/api\/(logic\/|restart|remote\/)/;
 
-async function handleApi(req, res, url) {
+// These change which character is active, so they must not be pinned to the old one
+const UNPINNED = new Set([ "/api/profiles/switch", "/api/profiles/create", "/api/profiles/import", "/api/snapshots/restore" ]);
+
+/**
+ * Every other request works on the character that was active when it arrived, even if you
+ * switch characters while it's still running (a reply can take a minute).
+ */
+const handleApi = (req, res, url) =>
+    UNPINNED.has(url.pathname) ? handleApiNow(req, res, url) : profiles.pinProfile(() => handleApiNow(req, res, url));
+
+async function handleApiNow(req, res, url) {
     if (!isLocal(req) && LOCAL_ONLY.test(url.pathname)) return send(res, 403, { error: "ใช้ได้เฉพาะบนคอมเครื่องนี้" });
+    // Anything that changes something must come from this app's own page (see isOwnPage)
+    if (req.method !== "GET" && req.method !== "HEAD" && !isOwnPage(req)) {
+        return send(res, 403, { error: "คำขอนี้ไม่ได้มาจากหน้าแชทของแอป" });
+    }
 
     // Pictures are binary, so they skip the JSON routes
     if (req.method === "GET" && url.pathname.startsWith("/api/upload/")) {
@@ -479,16 +552,13 @@ async function handleApi(req, res, url) {
 
 /* ------------------------------------ access from other devices (LAN, Cloudflare Tunnel) */
 
-// Proxies such as cloudflared connect from 127.0.0.1, so the socket alone can't tell a tunnel
-// visitor from you. Any forwarding header means the request came from outside this computer.
-const PROXY_HEADERS = [ "cf-connecting-ip", "cf-ray", "x-forwarded-for", "x-forwarded-host", "x-real-ip", "forwarded" ];
-
-const isLocal = (req) =>
-    /^(127\.|::1$|::ffff:127\.)/.test(req?.socket?.remoteAddress ?? "") &&
-    !PROXY_HEADERS.some((h) => req?.headers?.[h] != null);
-
-const clientIp = (req) => String(req.headers["cf-connecting-ip"] ?? req.headers["x-forwarded-for"] ?? req.socket?.remoteAddress ?? "").split(",")[0].trim();
-const isHttps = (req) => req.headers["x-forwarded-proto"] === "https" || String(req.headers["cf-visitor"] ?? "").includes("https");
+const isKnownHost = makeHostCheck({
+    isLan,
+    isQuickTunnel: /^(1|true|yes)$/i.test(String(process.env.TUNNEL ?? "")),
+    publicUrl: process.env.PUBLIC_URL ?? "",
+    // Extra names you open the app by, e.g. a hostname on your LAN: ALLOWED_HOSTS=mypc.local
+    extraHosts: String(process.env.ALLOWED_HOSTS ?? "").split(","),
+});
 
 /** A random key kept in settings; other devices open the link with ?key= once and get a cookie */
 async function accessKey() {
@@ -509,12 +579,6 @@ const sameKey = (a, b) => {
     const y = Buffer.from(String(b ?? ""));
     return x.length === y.length && x.length > 0 && crypto.timingSafeEqual(x, y);
 };
-
-const lanAddresses = () =>
-    Object.values(os.networkInterfaces())
-        .flat()
-        .filter((a) => a && a.family === "IPv4" && !a.internal)
-        .map((a) => a.address);
 
 /** The public tunnel address: PUBLIC_URL for a named tunnel, or the quick tunnel the runner started */
 async function tunnelUrl() {
@@ -553,10 +617,17 @@ const isBlocked = (ip) => {
     return f.count >= MAX_FAILURES;
 };
 
+const MAX_TRACKED = 5000;
+
 const recordFailure = (ip) => {
     const f = failures.get(ip);
     if (!f || Date.now() - f.since > FAILURE_WINDOW_MS) failures.set(ip, { since: Date.now(), count: 1 });
     else f.count++;
+    // Old entries go, so a flood of addresses can't grow this without limit
+    if (failures.size > MAX_TRACKED) {
+        for (const [ k, v ] of failures) if (Date.now() - v.since > FAILURE_WINDOW_MS) failures.delete(k);
+        while (failures.size > MAX_TRACKED) failures.delete(failures.keys().next().value);
+    }
 };
 
 /** @returns {Promise<boolean>} true when the request may continue */
@@ -596,9 +667,15 @@ async function accessGate(req, res, url) {
 const TYPES = { ".webmanifest": "application/manifest+json", ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon", ".woff2": "font/woff2" };
 
 async function serveStatic(req, res, url) {
-    const safe = path.normalize(decodeURIComponent(url.pathname)).replace(/^([/\\])+/, "");
+    let decoded = "";
+    try {
+        decoded = decodeURIComponent(url.pathname);
+    } catch {
+        return send(res, 400, { error: "bad path" });
+    }
+    const safe = path.normalize(decoded).replace(/^([/\\])+/, "");
     let file = path.join(DIST, safe);
-    if (!file.startsWith(DIST)) return send(res, 403, { error: "forbidden" });
+    if (!file.startsWith(DIST + path.sep) && file !== DIST) return send(res, 403, { error: "forbidden" });
     try {
         if (!(await stat(file)).isFile()) file = path.join(DIST, "index.html");
     } catch {
@@ -624,20 +701,40 @@ if (!isProd) {
     const publicHost = process.env.PUBLIC_URL ? new URL(process.env.PUBLIC_URL).hostname : "";
     vite = await createServer({
         root: ROOT,
-        server: { middlewareMode: true, hmr: false, allowedHosts: [ ".trycloudflare.com", ...(publicHost ? [ publicHost ] : []) ] },
+        server: { middlewareMode: true, hmr: false, allowedHosts: [ ".trycloudflare.com", ...(publicHost ? [ publicHost ] : []), ...String(process.env.ALLOWED_HOSTS ?? "").split(",").map((h) => h.trim()).filter(Boolean) ] },
         appType: "spa",
     });
 }
 
 await warmUp();
 
-const server = http.createServer(async (req, res) => {
-    const url = new URL(req.url, "http://localhost");
+async function handleRequest(req, res) {
+    let url;
+    try {
+        url = new URL(req.url, "http://localhost");
+    } catch {
+        return send(res, 400, { error: "bad request" });
+    }
+    if (!isKnownHost(req)) {
+        console.log(`  ⚠ ปฏิเสธคำขอจากชื่อ host ที่ไม่รู้จัก: ${String(req.headers.host ?? "").slice(0, 100)} (ถ้าเป็นของคุณ ใส่ใน ALLOWED_HOSTS)`);
+        res.writeHead(421, { "content-type": "text/plain; charset=utf-8" });
+        return res.end("unknown host");
+    }
     if (!(await accessGate(req, res, url))) return;
     if (url.pathname.startsWith("/api/")) return handleApi(req, res, url);
     if (await handleAppIcon(req, res, url)) return;
     if (vite) return vite.middlewares(req, res);
     return serveStatic(req, res, url);
+}
+
+const server = http.createServer(async (req, res) => {
+    try {
+        await handleRequest(req, res);
+    } catch (err) {
+        console.error("request failed:", err?.stack ?? err);
+        if (!res.headersSent) send(res, 500, { error: "เซิร์ฟเวอร์ผิดพลาด" });
+        else res.end();
+    }
 });
 
 away.startAwayScheduler(awayPing, {
@@ -666,6 +763,9 @@ server.listen(PORT, isLan ? "0.0.0.0" : "127.0.0.1", async () => {
     else if (brain.mode === "claude-code" && !brain.claudeCode.loggedIn) console.log("  ⚠ Claude Code ยังไม่ได้ล็อกอิน — พิมพ์ claude ใน terminal เพื่อล็อกอินก่อน");
     console.log("");
 
-    // Still up after a while, so the code from the last restart is good; drop the rollback marker
-    setTimeout(() => rm(path.join(ROOT, "data", ".backups", "pending-restart.json"), { force: true }).catch(() => {}), 12000);
+    // Under npm run dev the runner drops the rollback marker once /api/health answers;
+    // started by hand, there's no runner to roll back, so just clear it after a while
+    if (!process.env.PERSONA_RUNNER) {
+        setTimeout(() => rm(path.join(ROOT, "data", ".backups", "pending-restart.json"), { force: true }).catch(() => {}), 12000);
+    }
 });

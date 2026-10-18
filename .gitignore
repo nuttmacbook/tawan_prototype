@@ -3,6 +3,7 @@ dist/
 .env
 data/.brain/
 data/settings.json
+data/settings.json.bak
 data/.backups/
 data/.snapshots/
 data/.trash/

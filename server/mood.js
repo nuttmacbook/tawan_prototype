@@ -1,5 +1,5 @@
-import { writeFile } from "node:fs/promises";
 import { FILES, safeRead } from "./store.js";
+import { withFileLock, writeAtomic } from "./fsutil.js";
 
 /* ------------------------------------ config */
 
@@ -8,6 +8,7 @@ const LONELY_AFTER_HOURS = 6;      // away longer than this starts to make the p
 const LONELY_PER_HOURS = 12;       // +1 loneliness per this many hours away
 const LONELY_CAP = 8;
 const CLOSENESS_PER_MESSAGE = 0.3;
+const MAX_MESSAGES_COUNTED = 3;    // a burst of ten one-word messages shouldn't buy ten times the closeness
 const MAX_MOOD_STEP = 3;           // one message can't swing a mood more than this
 const MAX_CLOSENESS_STEP = 5;
 
@@ -120,7 +121,36 @@ export async function saveState(state) {
         `- อัปเดตอารมณ์ล่าสุด: ${fmtTime(state.moodUpdated)}`,
         "",
     ].join("\n");
-    await writeFile(FILES.state, text);
+    await writeAtomic(FILES.state, text);
+}
+
+/** Load, change and save state.md as one step, so two updates can't overwrite each other */
+const changeState = (fn) => withFileLock(FILES.state, async () => {
+    const state = await loadState();
+    const result = await fn(state);
+    await saveState(state);
+    return result;
+});
+
+/**
+ * Moves moods back toward normal for the hours since they were last updated,
+ * and grows loneliness for long absences. Changes `state` in place.
+ */
+function decay(state, now) {
+    const hours = state.moodUpdated == null ? 0 : Math.max(0, (now - state.moodUpdated) / 3600000);
+    if (hours > 0) {
+        for (const m of state.moods) {
+            const step = Math.min(Math.abs(m.value - m.base), hours * DECAY_PER_HOUR);
+            m.value += m.value > m.base ? -step : step;
+        }
+        // Loneliness follows how long the user has been gone, not how long since the last mood change
+        const away = state.lastSeen == null ? 0 : (now - state.lastSeen) / 3600000;
+        const lonely = state.moods.find((m) => m.name === "เหงา");
+        if (lonely && away > LONELY_AFTER_HOURS) {
+            lonely.value = Math.max(lonely.value, Math.min(LONELY_CAP, lonely.base + Math.floor(away / LONELY_PER_HOURS)));
+        }
+    }
+    state.moodUpdated = now;
 }
 
 /* ------------------------------------ changes */
@@ -129,38 +159,35 @@ export async function saveState(state) {
  * Lets moods drift back to normal over time, and grows loneliness while the user is away.
  * @returns {Promise<Awaited<ReturnType<typeof loadState>>>}
  */
-export async function passTime(now = Date.now()) {
+export function passTime(now = Date.now()) {
+    return changeState((state) => {
+        decay(state, now);
+        return state;
+    });
+}
+
+/** ms since the user last spoke, without recording anything; null if never */
+export async function gapSinceUser(now = Date.now()) {
     const state = await loadState();
-    const hours = state.moodUpdated == null ? 0 : Math.max(0, (now - state.moodUpdated) / 3600000);
-
-    if (hours > 0) {
-        for (const m of state.moods) {
-            const step = Math.min(Math.abs(m.value - m.base), hours * DECAY_PER_HOUR);
-            m.value += m.value > m.base ? -step : step;
-        }
-        const lonely = state.moods.find((m) => m.name === "เหงา");
-        if (lonely && hours > LONELY_AFTER_HOURS) {
-            lonely.value = Math.max(lonely.value, Math.min(LONELY_CAP, lonely.base + Math.floor(hours / LONELY_PER_HOURS)));
-        }
-    }
-
-    state.moodUpdated = now;
-    await saveState(state);
-    return state;
+    return state.lastSeen == null ? null : now - state.lastSeen;
 }
 
 /**
  * Records that the user just spoke: updates last-seen and nudges closeness up.
+ * Called after a reply succeeds, so a failed reply that gets retried isn't counted twice.
+ * @param {number} [now]
+ * @param {number} [count] how many messages the user sent in this turn
  * @returns {Promise<number | null>} ms since the previous message, null if first ever
  */
-export async function markUserMessage(now = Date.now()) {
-    const state = await loadState();
-    const gap = state.lastSeen == null ? null : now - state.lastSeen;
-    state.lastSeen = now;
-    state.messages += 1;
-    state.closeness = clamp(state.closeness + CLOSENESS_PER_MESSAGE, 0, 100);
-    await saveState(state);
-    return gap;
+export function markUserMessage(now = Date.now(), count = 1) {
+    return changeState((state) => {
+        const gap = state.lastSeen == null ? null : now - state.lastSeen;
+        const n = Math.max(1, Number(count) || 1);
+        state.lastSeen = now;
+        state.messages += n;
+        state.closeness = clamp(state.closeness + CLOSENESS_PER_MESSAGE * Math.min(n, MAX_MESSAGES_COUNTED), 0, 100);
+        return gap;
+    });
 }
 
 /**
@@ -168,8 +195,16 @@ export async function markUserMessage(now = Date.now()) {
  * @param {Record<string, number>} changes e.g. { "ดีใจ": 2, "งอน": -1, "ความสนิท": 1 }
  * @returns {Promise<string>} short confirmation
  */
-export async function adjustMood(changes = {}) {
-    const state = await loadState();
+export function adjustMood(changes = {}) {
+    return changeState((state) => applyMood(state, changes));
+}
+
+/** Names the model may invent for a feeling; anything else would end up as junk lines in state.md */
+const MAX_MOODS = 12;
+
+function applyMood(state, changes) {
+    // Time passes first; otherwise this update would wipe out the hours that should have calmed her down
+    decay(state, Date.now());
     const done = [];
 
     for (const [ name, raw ] of Object.entries(changes ?? {})) {
@@ -184,9 +219,11 @@ export async function adjustMood(changes = {}) {
         }
 
         let mood = state.moods.find((m) => m.name === name);
+        const cleanName = String(name).replace(/[\r\n:()]/g, " ").trim().slice(0, 20);
+        if (!mood && (!cleanName || state.moods.length >= MAX_MOODS)) continue;
         if (!mood) {
             // The model may name a feeling we don't track yet; add it with a neutral baseline
-            mood = { name, value: 0, base: 0 };
+            mood = { name: cleanName, value: 0, base: 0 };
             state.moods.push(mood);
         }
         const step = clamp(delta, -MAX_MOOD_STEP, MAX_MOOD_STEP);
@@ -194,8 +231,6 @@ export async function adjustMood(changes = {}) {
         done.push(`${name} ${step > 0 ? "+" : ""}${step}`);
     }
 
-    state.moodUpdated = Date.now();
-    await saveState(state);
     return done.length ? `อารมณ์: ${done.join(", ")}` : "อารมณ์ไม่เปลี่ยน";
 }
 

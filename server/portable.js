@@ -8,6 +8,8 @@ import { PERSONAS_DIR, MD_FILES, listProfiles, createProfile, loadSettings, save
 const FORMAT = "persona-agent";
 const VERSION = 1;
 const IDENTITY_FILES = [ "persona", "style", "teachings" ];
+// Written into every day folder this app makes, so clean-up never deletes a folder it didn't make
+const BACKUP_MARK = ".persona-agent-backup";
 const DAY_FILE = /^\d{4}-\d{2}-\d{2}\.md$/;
 const UPLOAD_FILE = /^[a-z0-9]+\.(jpg|png|webp|gif)$/;
 const MAX_IMPORT_BYTES = 60 * 1024 * 1024;
@@ -147,6 +149,7 @@ export async function backupAll() {
     if (!BACKUP_DIR) throw new Error("ยังไม่ได้ตั้ง BACKUP_DIR ในไฟล์ .env");
     const dayDir = path.join(BACKUP_DIR, today());
     await mkdir(dayDir, { recursive: true });
+    await writeFile(path.join(dayDir, BACKUP_MARK), "Made by persona-agent. Folders without this file are never deleted.\n");
 
     const profiles = await listProfiles();
     for (const p of profiles) {
@@ -154,7 +157,10 @@ export async function backupAll() {
         await writeFile(path.join(dayDir, `${p.id}-${safeFileName(pack.name)}.persona.json`), JSON.stringify(pack));
     }
 
-    const days = (await listDir(BACKUP_DIR)).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d)).sort();
+    const days = [];
+    for (const d of (await listDir(BACKUP_DIR)).filter((x) => /^\d{4}-\d{2}-\d{2}$/.test(x)).sort()) {
+        if (await stat(path.join(BACKUP_DIR, d, BACKUP_MARK)).catch(() => null)) days.push(d);
+    }
     for (const old of days.slice(0, Math.max(0, days.length - KEEP_DAYS))) {
         await rm(path.join(BACKUP_DIR, old), { recursive: true, force: true });
     }

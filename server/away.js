@@ -1,6 +1,6 @@
 import { loadState } from "./mood.js";
 import { planReply } from "./pacing.js";
-import { loadSettings, saveSettings, getActiveId } from "./profiles.js";
+import { loadSettings, saveSettings, currentId, pinProfile } from "./profiles.js";
 
 /* ------------------------------------ config */
 
@@ -10,6 +10,10 @@ const MAX_PER_DAY = 2;
 const CHECK_EVERY_MS = 60000;
 const CHANCE_PER_CHECK = 1 / 45;       // roughly once in 45 minutes after she becomes "eligible"
 const PAGE_CLOSED_AFTER_MS = 3 * 60000;
+// When answering fails (brain not logged in, offline), wait longer each time instead of
+// starting Claude every minute and burning through the quota
+const RETRY_BASE_MS = 2 * 60000;
+const RETRY_MAX_MS = 60 * 60000;
 
 /* ------------------------------------ presence */
 
@@ -46,7 +50,10 @@ const today = () => new Date().toLocaleDateString("sv-SE");
  * Closed chat with messages still waiting: she reads them when she'd have picked up her phone,
  * and her answer is there the next time you open the chat. Sleep waits until she wakes.
  */
+const failure = { count: 0, until: 0 };
+
 async function answerWhileClosed({ planReply, pending, reply }) {
+    if (Date.now() < failure.until) return false;
     const list = await pending();
     if (!list.length) return false;
     const plan = await planReply({ texts: list.map((m) => m.text) });
@@ -55,10 +62,21 @@ async function answerWhileClosed({ planReply, pending, reply }) {
     if (Date.now() - oldest < plan.readMs + Number(plan.laterMs ?? 0)) return false;
 
     // Replies made here are pushed by replyToPending in server/index.js
-    const result = await reply(list.map((m) => m.id), {
-        activity: plan.activity ?? "",
-        waitedMs: Date.now() - oldest,
-    });
+    let result;
+    try {
+        result = await reply(list.map((m) => m.id), {
+            activity: plan.activity ?? "",
+            waitedMs: Date.now() - oldest,
+        });
+        failure.count = 0;
+        failure.until = 0;
+    } catch (err) {
+        failure.count++;
+        const wait = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** (failure.count - 1));
+        failure.until = Date.now() + wait;
+        console.error(`  ⚠ ตอบข้อความที่ค้างไม่สำเร็จ (ลองใหม่ใน ${Math.round(wait / 60000)} นาที):`, err?.message ?? err);
+        return true;
+    }
     console.log(`  ✉ ตอบข้อความที่ค้างไว้: ${(result?.bubbles ?? []).join(" / ") || "(อ่านแล้วไม่ตอบ)"}`);
     return true;
 }
@@ -70,13 +88,24 @@ async function answerWhileClosed({ planReply, pending, reply }) {
  * @param {{ planReply: Function, pending: Function, reply: Function }} [deps] used to answer messages left waiting
  */
 export function startAwayScheduler(send, deps) {
-    setInterval(async () => {
+    let isBusy = false;
+    setInterval(() => {
+        // A reply can take longer than a minute; never start a second check on top of it
+        if (isBusy) return;
+        isBusy = true;
+        // Pinned, so a character switch mid-check can't make it write into the other character
+        pinProfile(tick).finally(() => {
+            isBusy = false;
+        });
+    }, CHECK_EVERY_MS);
+
+    async function tick() {
         try {
             if (isChatOpen()) return;
             if (deps && (await answerWhileClosed(deps))) return;
             if (!(AWAY_HOURS > 0) || Math.random() > CHANCE_PER_CHECK) return;
 
-            const id = getActiveId();
+            const id = currentId();
             const settings = await loadSettings();
             const log = settings?.awayPings?.[id] ?? {};
             const count = log.date === today() ? Number(log.count ?? 0) : 0;
@@ -96,12 +125,13 @@ export function startAwayScheduler(send, deps) {
             const result = await send(quietHours);
             if (!result?.bubbles?.length) return;
             await deps?.onAgentMessage?.(result.bubbles);
-            await saveSettings({
-                awayPings: { ...(settings?.awayPings ?? {}), [id]: { date: today(), count: count + 1, lastAt: Date.now() } },
-            });
+            // Read again: other settings may have changed while she was writing
+            await saveSettings((latest) => ({
+                awayPings: { ...(latest?.awayPings ?? {}), [id]: { date: today(), count: count + 1, lastAt: Date.now() } },
+            }));
             console.log(`  ✉ ${result.bubbles.join(" / ")}`);
         } catch (err) {
             console.error("away message failed:", err?.message ?? err);
         }
-    }, CHECK_EVERY_MS);
+    }
 }

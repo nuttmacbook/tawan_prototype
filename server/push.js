@@ -1,7 +1,8 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import webpush from "web-push";
 import { DATA_DIR, loadSettings, saveSettings } from "./profiles.js";
+import { withFileLock, writeAtomic } from "./fsutil.js";
 
 /* ------------------------------------ setup */
 
@@ -13,7 +14,17 @@ const CONTACT = process.env.PUSH_CONTACT || "mailto:persona-agent@example.com";
 let isReady = false;
 
 /** Creates the app's push keys once and keeps them in settings, so existing subscriptions stay valid */
-async function ensureKeys() {
+let keyRequest = null;
+
+/** Two first-time requests at once must not each make (and save) a different key pair */
+function ensureKeys() {
+    keyRequest ??= makeKeys().finally(() => {
+        keyRequest = null;
+    });
+    return keyRequest;
+}
+
+async function makeKeys() {
     const settings = await loadSettings();
     let keys = settings?.webPush;
     if (!keys?.publicKey || !keys?.privateKey) {
@@ -40,7 +51,26 @@ async function loadSubs() {
     }
 }
 
-const saveSubs = (list) => writeFile(SUBS_FILE, `${JSON.stringify(list, null, 1)}\n`);
+const saveSubs = (list) => writeAtomic(SUBS_FILE, `${JSON.stringify(list, null, 1)}\n`);
+const changeSubs = (fn) => withFileLock(SUBS_FILE, async () => {
+    const list = await loadSubs();
+    const next = await fn(list);
+    await saveSubs(next);
+    return next;
+});
+
+// Real browsers only ever hand out endpoints on these push services. Anything else would make
+// this server send requests wherever a caller points it.
+const PUSH_HOSTS = /(^|\.)(googleapis\.com|push\.apple\.com|push\.services\.mozilla\.com|notify\.windows\.com)$/i;
+
+const isPushEndpoint = (endpoint) => {
+    try {
+        const u = new URL(String(endpoint ?? ""));
+        return u.protocol === "https:" && PUSH_HOSTS.test(u.hostname);
+    } catch {
+        return false;
+    }
+};
 
 /**
  * Remembers a browser's push subscription (replacing an older one from the same endpoint).
@@ -48,19 +78,19 @@ const saveSubs = (list) => writeFile(SUBS_FILE, `${JSON.stringify(list, null, 1)
  * @param {string} label e.g. "มือถือ" so the list is readable
  */
 export async function subscribe(sub, label = "") {
-    if (!/^https:\/\//.test(String(sub?.endpoint ?? "")) || !sub?.keys?.p256dh || !sub?.keys?.auth) {
+    if (!isPushEndpoint(sub?.endpoint) || typeof sub?.keys?.p256dh !== "string" || typeof sub?.keys?.auth !== "string") {
         throw new Error("ข้อมูลการแจ้งเตือนไม่ถูกต้อง");
     }
     await ensureKeys();
-    const list = (await loadSubs()).filter((s) => s.endpoint !== sub.endpoint);
-    list.push({ endpoint: sub.endpoint, keys: { p256dh: sub.keys.p256dh, auth: sub.keys.auth }, label: String(label).slice(0, 60), at: Date.now() });
-    await saveSubs(list);
+    const list = await changeSubs((current) => [
+        ...current.filter((s) => s.endpoint !== sub.endpoint),
+        { endpoint: sub.endpoint, keys: { p256dh: sub.keys.p256dh.slice(0, 200), auth: sub.keys.auth.slice(0, 100) }, label: String(label).slice(0, 60), at: Date.now() },
+    ]);
     return list.length;
 }
 
 export async function unsubscribe(endpoint) {
-    const list = await loadSubs();
-    await saveSubs(list.filter((s) => s.endpoint !== String(endpoint ?? "")));
+    await changeSubs((list) => list.filter((s) => s.endpoint !== String(endpoint ?? "")));
 }
 
 export const subscriptionCount = async () => (await loadSubs()).length;
@@ -74,7 +104,8 @@ export const subscriptionCount = async () => (await loadSubs()).length;
  * @returns {Promise<number>} devices reached
  */
 export async function notifyAll({ title, body, tag = "persona-chat" }) {
-    const list = await loadSubs();
+    // Older entries from before the endpoint check are skipped too
+    const list = (await loadSubs()).filter((s) => isPushEndpoint(s.endpoint));
     if (!list.length) return 0;
     await ensureKeys();
 
@@ -90,7 +121,7 @@ export async function notifyAll({ title, body, tag = "persona-chat" }) {
             else console.error("  ⚠ ส่งแจ้งเตือนไม่สำเร็จ:", err?.statusCode ?? "", err?.body ?? err?.message ?? err);
         }
     }));
-    if (dead.size) await saveSubs(list.filter((s) => !dead.has(s.endpoint)));
+    if (dead.size) await changeSubs((current) => current.filter((s) => !dead.has(s.endpoint)));
     return reached;
 }
 

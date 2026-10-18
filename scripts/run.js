@@ -2,6 +2,7 @@
 // rolls the code back to the last backup if a restart crashes right away,
 // and keeps a Cloudflare quick tunnel open across those restarts when TUNNEL=1.
 import { spawn } from "node:child_process";
+import http from "node:http";
 import { readFile, writeFile, rm, mkdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -15,6 +16,11 @@ const TUNNEL_CONFIG = path.join(ROOT, "data", ".tunnel-config.yml");
 const SETTINGS_FILE = path.join(ROOT, "data", "settings.json");
 const RESTART_CODE = 75;
 const CRASH_WINDOW_MS = 10000;
+// New code must answer /api/health within this time, or it's rolled back like a crash
+const HEALTH_TIMEOUT_MS = 30000;
+// A crash later on restarts the server, but not forever: this many within 10 minutes means stop
+const MAX_CRASHES = 5;
+const CRASH_PERIOD_MS = 10 * 60000;
 
 try {
     process.loadEnvFile(path.join(ROOT, ".env"));
@@ -27,6 +33,8 @@ const CLOUDFLARED = process.env.CLOUDFLARED_BIN || "cloudflared";
 const args = process.argv.slice(2);
 let startedAt = 0;
 let hasRolledBack = false;
+let isStopping = false;
+let crashes = [];
 let server = null;
 let tunnel = null;
 
@@ -40,29 +48,74 @@ async function pendingBackup() {
 
 /* ------------------------------------ server */
 
-function start() {
-    startedAt = Date.now();
-    server = spawn(process.execPath, [ path.join(ROOT, "server", "index.js"), ...args ], { stdio: "inherit", cwd: ROOT, env: { ...process.env, PERSONA_RUNNER: "1" } });
+async function rollBack(backupId, reason) {
+    console.log(`\n  ⚠ ${reason} กำลังย้อนกลับไปที่ backup ${backupId}...\n`);
+    const { restoreBackup } = await import("../server/logic.js");
+    await restoreBackup(backupId);
+    await rm(RESTART_MARK, { force: true });
+    hasRolledBack = true;
+}
 
-    server.on("exit", async (code) => {
+/** Asks the fresh server one simple question; true when it answers properly */
+const isHealthy = () => new Promise((resolve) => {
+    const req = http.get({ host: "127.0.0.1", port: PORT, path: "/api/health", timeout: 5000 }, (res) => {
+        res.resume();
+        resolve(res.statusCode === 200);
+    });
+    req.on("timeout", () => req.destroy());
+    req.on("error", () => resolve(false));
+});
+
+/**
+ * After an editlogic restart, a server that starts but can't answer is as broken as one that crashes.
+ * Polls /api/health; if it never answers, the server is stopped and the code rolled back.
+ */
+async function watchHealth(child, backupId) {
+    const deadline = Date.now() + HEALTH_TIMEOUT_MS;
+    while (Date.now() < deadline && child.exitCode == null) {
+        await new Promise((r) => setTimeout(r, 1500));
+        if (await isHealthy()) {
+            await rm(RESTART_MARK, { force: true }).catch(() => {});
+            return;
+        }
+    }
+    if (child.exitCode != null || hasRolledBack) return;
+    child.isUnhealthy = true;
+    child.kill();
+}
+
+async function start() {
+    startedAt = Date.now();
+    const backupId = await pendingBackup();
+    const child = spawn(process.execPath, [ path.join(ROOT, "server", "index.js"), ...args ], { stdio: "inherit", cwd: ROOT, env: { ...process.env, PERSONA_RUNNER: "1" } });
+    server = child;
+    if (backupId && !hasRolledBack) watchHealth(child, backupId);
+
+    child.on("exit", async (code, signal) => {
+        if (isStopping) return;
         if (code === RESTART_CODE) {
             console.log("\n  ↻ รีสตาร์ทเซิร์ฟเวอร์เพื่อใช้โค้ดใหม่...\n");
             hasRolledBack = false;
             return start();
         }
 
-        const backupId = await pendingBackup();
         const crashedEarly = Date.now() - startedAt < CRASH_WINDOW_MS;
-        if (code !== 0 && crashedEarly && backupId && !hasRolledBack) {
-            console.log(`\n  ⚠ โค้ดใหม่ทำให้เซิร์ฟเวอร์เปิดไม่ขึ้น กำลังย้อนกลับไปที่ backup ${backupId}...\n`);
-            const { restoreBackup } = await import("../server/logic.js");
-            await restoreBackup(backupId);
-            await rm(RESTART_MARK, { force: true });
-            hasRolledBack = true;
+        if (backupId && !hasRolledBack && (child.isUnhealthy || (code !== 0 && crashedEarly))) {
+            await rollBack(backupId, child.isUnhealthy ? "โค้ดใหม่เปิดได้แต่ไม่ตอบ" : "โค้ดใหม่ทำให้เซิร์ฟเวอร์เปิดไม่ขึ้น");
             return start();
         }
 
-        stop(code ?? 0);
+        if (code === 0 || signal === "SIGINT" || signal === "SIGTERM") return stop(code ?? 0);
+
+        // Crashed while running: bring it back, so a phone outside doesn't find the app gone
+        crashes = [ ...crashes.filter((t) => Date.now() - t < CRASH_PERIOD_MS), Date.now() ];
+        if (crashes.length > MAX_CRASHES) {
+            console.log(`\n  ⚠ เซิร์ฟเวอร์ล้มบ่อยเกินไป (${crashes.length} ครั้งใน 10 นาที) หยุดก่อน ดู error ด้านบนแล้วเปิดใหม่ด้วย npm run dev\n`);
+            return stop(code ?? 1);
+        }
+        const wait = 2000 * crashes.length;
+        console.log(`\n  ⚠ เซิร์ฟเวอร์ล้ม (รหัส ${code ?? signal}) จะเปิดใหม่ใน ${wait / 1000} วินาที\n`);
+        setTimeout(start, wait);
     });
 }
 
@@ -138,6 +191,7 @@ function killTree(child) {
 }
 
 function stop(code = 0) {
+    isStopping = true;
     if (tunnel) {
         tunnel.isStopping = true;
         killTree(tunnel);
@@ -147,6 +201,7 @@ function stop(code = 0) {
 
 // Ctrl+C stops the runner, the server and the tunnel together
 process.on("SIGINT", () => {
+    isStopping = true;
     server?.kill("SIGINT");
     stop(0);
 });
