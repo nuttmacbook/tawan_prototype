@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile, readdir, rename, copyFile } from "node:fs/p
 import path from "node:path";
 import { DATA_DIR, activeDir, fileOf, loadSettings, saveSettings } from "./profiles.js";
 import { withFileLock, writeAtomic, updateText } from "./fsutil.js";
+import { normalize, similarity } from "./textmatch.js";
 
 // Paths follow whichever character is active, so switching characters needs no restart
 const FILES = new Proxy({}, { get: (_, name) => fileOf(String(name)) });
@@ -82,8 +83,55 @@ export async function remember(topic, fact) {
     const cleanFact = String(fact ?? "").replace(/[\r\n]+/g, " ").trim();
     if (!cleanFact) return "ไม่มีข้อมูลให้จำ";
 
-    await appendToSection(FILES.memory, cleanTopic, `- [${today()}] ${cleanFact}`);
-    return `จำแล้ว (${cleanTopic}): ${cleanFact}`;
+    let outcome = "new";
+    await updateText(FILES.memory, (text) => {
+        const lines = text.split("\n");
+        const match = findSameFact(lines, cleanFact);
+        outcome = match.kind;
+        if (match.kind === "known") return null;
+        // The newer wording wins: it's either more detailed or the same fact said again with today's date
+        const kept = lines.filter((_, i) => !match.indexes.includes(i));
+        const doc = splitSections(kept.join("\n"));
+        const line = `- [${today()}] ${cleanFact}`;
+        const index = doc.sections.findIndex((x) => sectionTitle(x) === cleanTopic);
+        if (index >= 0) doc.sections[index] = `${doc.sections[index].trimEnd()}\n${line}`;
+        else doc.sections.push(`## ${cleanTopic}\n${line}`);
+        // A topic left with no facts after the move goes away
+        doc.sections = doc.sections.filter((x) => x.split("\n").slice(1).some((l) => l.trim()));
+        return joinSections(doc);
+    });
+    if (outcome === "known") return `รู้อยู่แล้ว: ${cleanFact}`;
+    return `${outcome === "replace" ? "อัปเดตความจำ" : "จำแล้ว"} (${cleanTopic}): ${cleanFact}`;
+}
+
+const isNegative = (text) => /ไม่|เลิก|ห้าม|ยังไม่/.test(String(text ?? ""));
+
+// Close enough to be the same fact in other words; kept high so two different likes stay two lines
+const SAME_FACT = 0.85;
+
+/**
+ * Looks for this fact among the remembered ones, so she doesn't write "ชอบชาบู" five times.
+ * @returns {{ kind: "new" | "known" | "replace", indexes: number[] }}
+ *   known: an existing line already says all of it · replace: these lines say less or the same, differently
+ */
+function findSameFact(lines, fact) {
+    const plain = normalize(fact);
+    const indexes = [];
+    for (const [ i, line ] of lines.entries()) {
+        if (!line.startsWith("- ")) continue;
+        const old = line.replace(/^- (\[\d{4}-\d{2}-\d{2}\]\s*)?/, "");
+        const oldPlain = normalize(old);
+        if (!oldPlain) continue;
+        const contains = oldPlain.includes(plain) || plain.includes(oldPlain);
+        // "มีแมว" sits inside "ไม่มีแมว", but it's the opposite: the newer one is what's true now
+        if (contains && isNegative(old) !== isNegative(fact)) {
+            indexes.push(i);
+            continue;
+        }
+        if (oldPlain !== plain && oldPlain.includes(plain)) return { kind: "known", indexes: [] };
+        if (oldPlain === plain || plain.includes(oldPlain) || similarity(old, fact) >= SAME_FACT) indexes.push(i);
+    }
+    return { kind: indexes.length ? "replace" : "new", indexes };
 }
 
 /**

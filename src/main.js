@@ -2,7 +2,7 @@ import "./main.css";
 import { api } from "./api.js";
 import { header, brainPicker, subline, fullRoleButton, remoteLinks } from "./components/header.js";
 import { chatPanel, bubble, note, typing, errorLine, statusAside, pacingNote, stateNote, correctionForm, previewOf, divider, unsentLine } from "./components/chat.js";
-import { teachPanel, lessonList, snapshotList, FILES } from "./components/teach.js";
+import { teachPanel, lessonList, snapshotList, configFields, FILES } from "./components/teach.js";
 import { overlays, searchResults } from "./components/overlays.js";
 import { logicPanel, logicEvent, backupList, logicWorking } from "./components/logic.js";
 import { esc } from "./components/ui.js";
@@ -48,6 +48,8 @@ const state = {
     logicNext: 0,
     isLogicPolling: false,
     rethinkOnInterrupt: false,
+    config: null,
+    pushPreview: true,
 };
 
 /** The conversation engine: what you've sent, what she's read, and whether she's busy replying */
@@ -477,6 +479,7 @@ if (typeof window !== "undefined") {
         if (id === "teach") {
             refreshSnapshots();
             refreshBackupInfo();
+            refreshConfig();
         }
         if (id === "logic") loadLogic();
         if (id === "chat") $("[data-chat-input]")?.focus();
@@ -1113,7 +1116,9 @@ function renderNotify() {
     const hint = (text) => `<p class="px-2 pb-1 text-[11px] text-slate-500">${text}</p>`;
 
     if (state.pushSub) {
-        area.innerHTML = row("🔔 แจ้งเตือนเปิดอยู่ · ส่งทดสอบ", "testPush()", "text-emerald-300") + row("🔕 ปิดการแจ้งเตือนบนเครื่องนี้", "disablePush()");
+        area.innerHTML = row("🔔 แจ้งเตือนเปิดอยู่ · ส่งทดสอบ", "testPush()", "text-emerald-300")
+            + row(state.pushPreview ? "👁 แสดงข้อความในแจ้งเตือน · แตะเพื่อซ่อน" : "🙈 ซ่อนข้อความในแจ้งเตือน · แตะเพื่อแสดง", "togglePushPreview()")
+            + row("🔕 ปิดการแจ้งเตือนบนเครื่องนี้", "disablePush()");
     } else if (canPush()) {
         area.innerHTML = Notification.permission === "denied"
             ? row("🔕 การแจ้งเตือนถูกบล็อก", "enableNotifications()") + hint("เปิดสิทธิ์แจ้งเตือนของเว็บนี้ในตั้งค่าเบราว์เซอร์ก่อน")
@@ -1176,6 +1181,49 @@ if (typeof document !== "undefined") {
             body: JSON.stringify({ clientId: state.clientId, visible: false }),
         }).catch(() => {});
     });
+}
+
+/* ------------------------------------ app settings */
+
+async function refreshConfig() {
+    try {
+        state.config = await api.config();
+        const el = $("[data-config-fields]");
+        if (el) el.innerHTML = configFields(state.config);
+    } catch {}
+}
+
+if (typeof window !== "undefined") {
+    window.saveConfig = async () => {
+        const msg = $("[data-config-msg]");
+        const values = {};
+        document.querySelectorAll("[data-config-key]").forEach((el) => {
+            values[el.dataset.configKey] = el.type === "checkbox" ? el.checked : el.value;
+        });
+        try {
+            state.config = await api.saveConfig(values);
+            const el = $("[data-config-fields]");
+            if (el) el.innerHTML = configFields(state.config);
+            // The idle nudge timer lives in this page, so it picks up the new value right away
+            state.idleMinutes = Number(state.config?.values?.idleMinutes ?? state.idleMinutes);
+            state.pushPreview = state.config?.values?.pushPreview !== false;
+            armIdle();
+            if (msg) msg.textContent = "✓ บันทึกแล้ว";
+        } catch (err) {
+            if (msg) msg.textContent = err.message;
+        }
+    };
+
+    // Lock-screen privacy, from the notification menu
+    window.togglePushPreview = async () => {
+        try {
+            const res = await api.saveConfig({ pushPreview: !state.pushPreview });
+            state.pushPreview = res?.values?.pushPreview !== false;
+            renderNotify();
+        } catch (err) {
+            alert(err.message);
+        }
+    };
 }
 
 async function refreshBackupInfo() {
@@ -1602,6 +1650,7 @@ async function boot() {
         state.status = data?.status ?? null;
         state.idleMinutes = Number(data?.idleMinutes ?? 15);
         state.rethinkOnInterrupt = data?.rethinkOnInterrupt === true;
+        state.pushPreview = data?.pushPreview !== false;
         state.lastSeenAgentAt = Number(data?.lastAgentAt ?? 0);
         state.profileId = data?.profileId ?? "";
         state.profiles = data?.profiles ?? [];

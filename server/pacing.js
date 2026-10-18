@@ -1,5 +1,6 @@
 import { loadState } from "./mood.js";
 import { loadTexts } from "./store.js";
+import { currentId } from "./profiles.js";
 
 /* ------------------------------------ config */
 
@@ -69,8 +70,8 @@ export function parseActivities(persona) {
     return rows;
 }
 
-/** What she's doing right now; lives for this server run so later messages wait for the same activity */
-let current = null;
+/** What each character is doing right now; lives for this server run so later messages wait for the same activity */
+const doing = new Map();
 
 const inHours = (hour, ranges) => ranges.some(([ from, to ]) => hour >= from && hour < to);
 
@@ -79,8 +80,10 @@ const inHours = (hour, ranges) => ranges.some(([ from, to ]) => hour >= from && 
  * @returns {{ name: string, until: number, phoneAway: boolean } | null}
  */
 function activityAt(now, { hour, isInChat, isAsleep, lonely, activities }) {
+    const id = currentId();
+    const current = doing.get(id);
     if (current && now < current.until) return current;
-    current = null;
+    doing.delete(id);
     if (isAsleep) return null;
 
     // Lonely means she keeps the phone close; chatting means she's less likely to wander off
@@ -88,8 +91,9 @@ function activityAt(now, { hour, isInChat, isAsleep, lonely, activities }) {
     for (const a of activities.filter((x) => inHours(hour, x.hours))) {
         if (Math.random() < a.chance * scale) {
             const ms = Math.min(PACING.maxBusyMs, between(a.minutes) * 60000);
-            current = { name: a.name, until: now + ms, phoneAway: a.phoneAway };
-            return current;
+            const next = { name: a.name, until: now + ms, phoneAway: a.phoneAway };
+            doing.set(id, next);
+            return next;
         }
     }
     return null;
@@ -214,7 +218,7 @@ export async function planReply({ texts = [], lastAgentAt = 0, lastReadAt = 0, n
 
 /** Debug: ends whatever she's doing so the next message is handled normally */
 export const clearActivity = () => {
-    current = null;
+    doing.delete(currentId());
 };
 
 export { PACING, ACTIVITIES };

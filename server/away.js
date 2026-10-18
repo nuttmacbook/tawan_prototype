@@ -1,12 +1,12 @@
 import { loadState } from "./mood.js";
 import { planReply } from "./pacing.js";
-import { loadSettings, saveSettings, currentId, pinProfile } from "./profiles.js";
+import { loadSettings, saveSettings, currentId, pinProfile, getActiveId, listProfiles } from "./profiles.js";
+import { getConfig } from "./config.js";
 
 /* ------------------------------------ config */
 
 // She only texts first when the chat has been closed and quiet for a while
-const AWAY_HOURS = Number(process.env.AWAY_PING_HOURS ?? 4) || 4;
-const MAX_PER_DAY = 2;
+// How long and how often come from the settings page (server/config.js)
 const CHECK_EVERY_MS = 60000;
 const CHANCE_PER_CHECK = 1 / 45;       // roughly once in 45 minutes after she becomes "eligible"
 const PAGE_CLOSED_AFTER_MS = 3 * 60000;
@@ -50,9 +50,12 @@ const today = () => new Date().toLocaleDateString("sv-SE");
  * Closed chat with messages still waiting: she reads them when she'd have picked up her phone,
  * and her answer is there the next time you open the chat. Sleep waits until she wakes.
  */
-const failure = { count: 0, until: 0 };
+// Backoff per character: one character's brain failing shouldn't hold up the others
+const failures = new Map();
 
 async function answerWhileClosed({ planReply, pending, reply }) {
+    const failure = failures.get(currentId()) ?? { count: 0, until: 0 };
+    failures.set(currentId(), failure);
     if (Date.now() < failure.until) return false;
     const list = await pending();
     if (!list.length) return false;
@@ -93,17 +96,30 @@ export function startAwayScheduler(send, deps) {
         // A reply can take longer than a minute; never start a second check on top of it
         if (isBusy) return;
         isBusy = true;
-        // Pinned, so a character switch mid-check can't make it write into the other character
-        pinProfile(tick).finally(() => {
+        everyCharacter().finally(() => {
             isBusy = false;
         });
     }, CHECK_EVERY_MS);
 
-    async function tick() {
+    /**
+     * Each character lives her own life: the one on screen waits while you have the chat open,
+     * but the others still read and answer what you left them, and may text you first.
+     * Each check is pinned, so it reads and writes only that character's files.
+     */
+    async function everyCharacter() {
+        const active = getActiveId();
+        for (const p of await listProfiles().catch(() => [])) {
+            await pinProfile(() => tick(p.id === active), p.id);
+        }
+    }
+
+    async function tick(isOnScreen) {
         try {
-            if (isChatOpen()) return;
+            if (isOnScreen && isChatOpen()) return;
             if (deps && (await answerWhileClosed(deps))) return;
-            if (!(AWAY_HOURS > 0) || Math.random() > CHANCE_PER_CHECK) return;
+            const { awayPingHours: AWAY_HOURS, awayPerDay: MAX_PER_DAY } = await getConfig();
+            // 0 really means off (it used to fall back to 4 hours)
+            if (!(AWAY_HOURS > 0) || !(MAX_PER_DAY > 0) || Math.random() > CHANCE_PER_CHECK) return;
 
             const id = currentId();
             const settings = await loadSettings();

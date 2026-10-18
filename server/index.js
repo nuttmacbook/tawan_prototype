@@ -27,6 +27,7 @@ const store = await import("./store.js");
 const { loadState, describeMood, stageOf, agoText } = await import("./mood.js");
 const { loadThreads } = await import("./life.js");
 const { styleSettings } = await import("./humanize.js");
+const config = await import("./config.js");
 const { claudeCodeStatus, API_MODEL, CC_MODEL } = await import("./llm.js");
 const { isLocal, clientIp, isHttps, lanAddresses, makeHostCheck, isOwnPage } = await import("./gate.js");
 
@@ -153,7 +154,7 @@ async function replyToPending(ids, context = {}) {
             noteUnsent(m.text);
         }
         maybeTidyMemory();
-        if (result?.bubbles?.length && !away.isBeingViewed()) pushMessage(result.bubbles);
+        if (result?.bubbles?.length && !isWatching()) pushMessage(result.bubbles);
         settle.resolve(result);
         return mergeReplies([ ...earlier, result ]);
     } catch (err) {
@@ -170,10 +171,15 @@ async function replyToPending(ids, context = {}) {
     }
 }
 
+/** Someone is looking at this character's chat right now (a reply for another character still gets a push) */
+const isWatching = () => away.isBeingViewed() && profiles.currentId() === profiles.getActiveId();
+
 /** Sends her message to subscribed phones when nobody is looking at the chat */
 async function pushMessage(bubbles) {
     try {
-        await push.notifyAll({ title: await personaName(), body: push.previewText(bubbles) });
+        // A lock screen anyone can glance at: the setting can hide what she wrote
+        const { pushPreview } = await config.getConfig();
+        await push.notifyAll({ title: await personaName(), body: pushPreview ? push.previewText(bubbles) : "ส่งข้อความมา 💬" });
     } catch (err) {
         console.error("push failed:", err?.message ?? err);
     }
@@ -186,7 +192,6 @@ const clockOf = (t) => new Date(t).toLocaleTimeString("en-GB", { hour: "2-digit"
 
 /* ------------------------------------ automatic memory tidy */
 
-const AUTO_TIDY_CHARS = Number(process.env.AUTO_TIDY_CHARS ?? 8000) || 0;
 let isTidying = false;
 
 /**
@@ -194,6 +199,7 @@ let isTidying = false;
  * with a snapshot first so nothing is ever lost for good.
  */
 async function maybeTidyMemory() {
+    const { autoTidyChars: AUTO_TIDY_CHARS } = await config.getConfig();
     if (!AUTO_TIDY_CHARS || isTidying) return;
     // Set before the first await, so two replies finishing together can't both start a tidy-up
     isTidying = true;
@@ -230,7 +236,8 @@ const routes = {
         status: await statusPayload(),
         history: await store.todayEntries(),
         pending: await store.loadPending(),
-        idleMinutes: Number(process.env.IDLE_MINUTES ?? 15),
+        idleMinutes: (await config.getConfig()).idleMinutes,
+        pushPreview: (await config.getConfig()).pushPreview,
         rethinkOnInterrupt: styleSettings((await store.loadTexts()).style).rethink,
         lastAgentAt: presence().lastAgentAt,
         isLocal: isLocal(req),
@@ -254,7 +261,16 @@ const routes = {
 
     /* ---------- push notifications */
 
-    "GET /api/push/key": async () => ({ key: await push.publicKey(), count: await push.subscriptionCount() }),
+    "GET /api/push/key": async () => ({
+        key: await push.publicKey(),
+        count: await push.subscriptionCount(),
+        preview: (await config.getConfig()).pushPreview,
+    }),
+
+    /* ---------- app settings (were only in .env) */
+
+    "GET /api/config": async () => ({ values: await config.getConfig(), fields: config.describeConfig() }),
+    "POST /api/config": async (body) => ({ values: await config.setConfig(body?.values ?? {}), fields: config.describeConfig() }),
 
     "POST /api/push/subscribe": async (body) => ({ count: await push.subscribe(body?.subscription, body?.label) }),
 
@@ -312,7 +328,8 @@ const routes = {
     },
 
     "POST /api/snapshots/restore": async (body) => {
-        await switchExclusive(() => profiles.restoreSnapshot(body?.id));
+        // Her files were just replaced, so her short-term memory of the last minutes goes too
+        await switchExclusive(() => profiles.restoreSnapshot(body?.id), { reset: true });
         return { snapshots: await profiles.listSnapshots() };
     },
 
