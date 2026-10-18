@@ -58,8 +58,13 @@ export const cutLastReply = (shown, expected) =>
     withLock(async () => {
         const reply = lastReply;
         if (!reply || reply.profileId !== currentId()) return false;
-        if (JSON.stringify(reply.bubbles) !== JSON.stringify(Array.isArray(expected) ? expected : [])) return false;
-        const n = Math.max(0, Math.min(reply.bubbles.length, Math.floor(Number(shown) || 0)));
+        // The page may have shown an earlier reply first (one it waited on), then this one:
+        // its list then ends with this reply's bubbles, and "shown" counts from the start of the list
+        const list = Array.isArray(expected) ? expected : [];
+        const offset = list.length - reply.bubbles.length;
+        if (offset < 0 || JSON.stringify(list.slice(offset)) !== JSON.stringify(reply.bubbles)) return false;
+        const n = Math.floor(Number(shown) || 0) - offset;
+        if (n < 0) return false;
         if (n >= reply.bubbles.length) return false;
 
         const kept = reply.bubbles.slice(0, n);
@@ -675,6 +680,7 @@ export const awayPing = (hours) =>
         const result = await turn(
             `[ระบบ: ผู้ใช้ไม่ได้เปิดแชทมาประมาณ ${Math.round(hours)} ชั่วโมง ตอนนี้ไม่ได้อยู่ในแชท ถ้าตัวละครนึกถึงหรือมีเรื่องอยากเล่า ให้ส่งข้อความสั้น ๆ เหมือนทักหาเพื่อน (เล่าเรื่องในไดอารี่ ถามเรื่องค้าง หรือแค่ทักเล่น) ถ้าไม่มีเหตุให้ทักก็ไม่ต้องทัก]`,
         );
+        lastReply = null;
         if (result.bubbles.length) {
             lastAgentAt = Date.now();
             lastGreetAt = Date.now();
@@ -739,6 +745,7 @@ export const greet = () =>
             : `ผู้ใช้เพิ่งเปิดหน้าแชท คุยกันครั้งล่าสุด ${agoText(gap)} ทักก่อนอย่างเป็นธรรมชาติตามเวลาและอารมณ์ ถ้ามีเรื่องค้างที่ถึงเวลาก็ถามได้`;
 
         const result = await turn(`[ระบบ: ${note}]`);
+        lastReply = null;
         if (result.bubbles.length) {
             lastAgentAt = Date.now();
             recordReply(result.bubbles, await logTurn("agent", await personaName(), bubblesForLog(result.bubbles)));
@@ -756,6 +763,7 @@ export const nudge = (minutes) =>
         const result = await turn(
             `[ระบบ: ผู้ใช้เงียบไป ${Math.round(minutes)} นาที ถ้าตัวละครอยากทักก็ทักสั้น ๆ ตามอารมณ์และเวลา ถ้าไม่ควรทัก (เพิ่งบอกลา, ดึกมาก, ทักไปแล้วยังไม่ตอบ) ไม่ต้องทัก]`,
         );
+        lastReply = null;
         if (result.bubbles.length) {
             lastAgentAt = Date.now();
             recordReply(result.bubbles, await logTurn("agent", await personaName(), bubblesForLog(result.bubbles)));
@@ -776,6 +784,9 @@ async function lastLoggedAt() {
 /** Clears short-term memory only; md files stay untouched */
 export const resetSession = () => {
     transcript.length = 0;
+    // Both point into the transcript that was just cleared
+    lastReply = null;
+    draft = null;
 };
 
 /** Reads the "ชื่อ:" line from persona.md so labels follow the user's edits */

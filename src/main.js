@@ -62,6 +62,8 @@ const engine = {
     seq: 0,
     // Set when you send something worth stopping for while she's typing (see src/interrupt.js)
     isInterrupted: false,
+    // The last reply was dropped to think again; the next one is shown whatever happens
+    hasRethought: false,
 };
 
 /** She looks at the chat: everything you've sent so far shows "อ่านแล้ว" */
@@ -395,7 +397,9 @@ async function reply(plan) {
 
         // Optional (style.md "คิดใหม่เมื่อถูกพิมพ์แทรก"): you wrote something important before her first bubble
         // appeared, so she drops this answer and replies to everything together. Costs one more brain call.
-        if (engine.isInterrupted && state.rethinkOnInterrupt && result?.bubbles?.length) {
+        // Once in a row at most: a stream of messages shouldn't throw away reply after reply
+        if (engine.isInterrupted && state.rethinkOnInterrupt && !engine.hasRethought && result?.bubbles?.length) {
+            engine.hasRethought = true;
             setTyping(false);
             glance();
             await cutReply(result, 0);
@@ -405,6 +409,7 @@ async function reply(plan) {
             }
             return;
         }
+        engine.hasRethought = false;
         await cutReply(result, await speak(result, plan, startedAt));
     } catch (err) {
         setTyping(false);
@@ -436,7 +441,8 @@ function armIdle() {
         try {
             const plan = await getPlan([]);
             engine.isInterrupted = false;
-            const result = plan.isAsleep ? null : await api.nudge(state.idleMinutes * state.nudges);
+            // You wrote meanwhile: answer that instead of nudging
+            const result = plan.isAsleep || engine.pending.length ? null : await api.nudge(state.idleMinutes * state.nudges);
             if (result?.bubbles?.length) {
                 setTyping(true);
                 await cutReply(result, await speak(result, plan, Date.now()));
@@ -445,8 +451,11 @@ function armIdle() {
             console.error(err);
         } finally {
             engine.isReplying = false;
+            engine.isInterrupted = false;
             setPresence();
             armIdle();
+            // A message sent while she was nudging waited for her to finish; answer it now
+            if (engine.pending.length) schedule();
         }
     }, state.idleMinutes * 60000);
 }
@@ -587,7 +596,8 @@ if (typeof window !== "undefined") {
             return markFailed([ { id, text } ], err, { isSendFailure: true });
         }
         el.textContent = "ส่งแล้ว";
-        engine.pending.push({ id, text, sentAt: Date.now() });
+        engine.pending.push({ id, text, sentAt: Date.now(), isRead: false });
+        if (engine.isReplying && !engine.isAway && shouldInterrupt(text)) engine.isInterrupted = true;
         schedule();
     };
 
