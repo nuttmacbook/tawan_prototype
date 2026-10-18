@@ -14,7 +14,7 @@ process.on("unhandledRejection", (err) => console.error("unhandled:", err?.stack
 
 const {
     chat, greet, nudge, warmUp, resetSession, personaName, brainMode, consolidateHistory, compactMemory, hasApiKey, presence,
-    addReaction, awayPing, switchExclusive, noteUnsent, promptStats,
+    addReaction, awayPing, switchExclusive, noteUnsent, promptStats, cutLastReply,
 } = await import("./brain.js");
 const profiles = await import("./profiles.js");
 const away = await import("./away.js");
@@ -26,6 +26,7 @@ const logic = await import("./logic.js");
 const store = await import("./store.js");
 const { loadState, describeMood, stageOf, agoText } = await import("./mood.js");
 const { loadThreads } = await import("./life.js");
+const { styleSettings } = await import("./humanize.js");
 const { claudeCodeStatus, API_MODEL, CC_MODEL } = await import("./llm.js");
 const { isLocal, clientIp, isHttps, lanAddresses, makeHostCheck, isOwnPage } = await import("./gate.js");
 
@@ -230,6 +231,7 @@ const routes = {
         history: await store.todayEntries(),
         pending: await store.loadPending(),
         idleMinutes: Number(process.env.IDLE_MINUTES ?? 15),
+        rethinkOnInterrupt: styleSettings((await store.loadTexts()).style).rethink,
         lastAgentAt: presence().lastAgentAt,
         isLocal: isLocal(req),
         lan: isLocal(req) ? await remoteInfo() : null,
@@ -387,6 +389,9 @@ const routes = {
         const context = { activity: String(body?.activity ?? ""), readAgoMs: Number(body?.readAgoMs ?? 0), waitedMs: Number(body?.waitedMs ?? 0) };
         return { ...(await replyToPending(body?.ids, context)), status: await statusPayload() };
     },
+
+    // She stopped typing because you sent something: keep only the bubbles that appeared on screen
+    "POST /api/cut": async (body) => ({ ok: await cutLastReply(body?.shown, body?.bubbles) }),
 
     "POST /api/pacing": async (body) => planReply({ texts: Array.isArray(body?.texts) ? body.texts : [], ...presence() }),
 

@@ -30,6 +30,7 @@ export const api = {
     chat: (ids, context = {}) => call("/api/chat", { ids, ...context }),
     clearActivity: () => call("/api/pacing/clear", {}),
     pacing: (texts) => call("/api/pacing", { texts }),
+    cut: (shown, bubbles) => call("/api/cut", { shown, bubbles }),
     logicState: (since) => call(`/api/logic/state?since=${Number(since) || 0}`),
     logicRun: (prompt) => call("/api/logic/run", { prompt }),
     logicReset: () => call("/api/logic/reset", {}),

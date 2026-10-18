@@ -159,3 +159,23 @@ test("reactions: saved in the day's log and read back on the right bubble", asyn
     assert.deepEqual(entries.map((e) => e.reactions), [ [ "👍" ], [ "", "❤️" ] ]);
     assert.equal(entries.length, 2);
 });
+
+/* ------------------------------------ stopping mid-reply */
+
+test("interrupt: questions and real news stop her, a laugh doesn't", async () => {
+    const { shouldInterrupt } = await import("../src/interrupt.js");
+    for (const t of [ "555", "5555+", "อือ", "โอเค", "😂", "จริงดิ", "ใช่" ]) assert.equal(shouldInterrupt(t), false, t);
+    for (const t of [ "พรุ่งนี้ว่างป่ะ", "กินไรยัง?", "เดี๋ยวนะ", "วันนี้เหนื่อยมาก", "[รูป:abc.jpg]", "[ตอบกลับ \"x\"] อันนี้", "เมื่อกี้เจอแฟนเก่าที่ห้างอ่ะ" ]) {
+        assert.equal(shouldInterrupt(t), true, t);
+    }
+});
+
+test("replaceLoggedLine: a cut reply keeps only what was shown", async () => {
+    const logged = await store.logTurn("agent", "ตะวัน", store.bubblesForLog([ "หนึ่ง", "สอง", "สาม" ]));
+    assert.equal(await store.replaceLoggedLine(logged, logged.line.replace(" / สอง / สาม", "")), true);
+    const last = (await store.todayEntries()).at(-1);
+    assert.equal(last.text, "หนึ่ง");
+    const gone = await store.logTurn("agent", "ตะวัน", "ทั้งหมด");
+    await store.replaceLoggedLine(gone, null);
+    assert.notEqual((await store.todayEntries()).at(-1).text, "ทั้งหมด");
+});

@@ -8,6 +8,7 @@ const DEFAULTS = {
     calmBang: true,       // at most one "!" and often none
     dropQuestion: 0.3,    // chance to drop a trailing "?"
     typo: 0.04,           // chance of a typo followed by a "*fix" bubble
+    rethink: false,       // a message arriving before her first bubble shows: drop the reply and think again (one more brain call)
 };
 
 const LABELS = {
@@ -17,6 +18,7 @@ const LABELS = {
     calmBang: "ลดเครื่องหมายตกใจ",
     dropQuestion: "ตัดเครื่องหมายคำถามท้าย",
     typo: "พิมพ์ผิดแล้วแก้",
+    rethink: "คิดใหม่เมื่อถูกพิมพ์แทรก",
 };
 
 /**

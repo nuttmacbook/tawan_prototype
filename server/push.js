@@ -128,6 +128,6 @@ export async function notifyAll({ title, body, tag = "persona-chat" }) {
 /** How a chat message reads on a lock screen: pictures and stickers become words */
 export const previewText = (bubbles) =>
     (Array.isArray(bubbles) ? bubbles : [ bubbles ])
-        .map((b) => String(b ?? "").replace(/\[รูป:[^\]]+\]/g, "📷 รูป").trim())
+        .map((b) => String(b ?? "").replace(/\[รูป:[^\]]+\]/g, "📷 รูป").replace(/^\[ตอบกลับ "[^"]*"\]\s*/, "↩ ").trim())
         .filter(Boolean)
         .join("\n");

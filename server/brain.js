@@ -2,7 +2,7 @@ import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import {
     loadTexts, loadRecentHistory, remember, teach, replaceMemoryIf, readMemoryFile,
-    pastHistoryFiles, archiveHistory, appendJournal, loadSettings, logTurn, logReaction, bubblesForLog, uploadsDir, todayEntries,
+    pastHistoryFiles, archiveHistory, appendJournal, loadSettings, logTurn, logReaction, replaceLoggedLine, bubblesForLog, uploadsDir, todayEntries,
 } from "./store.js";
 import { loadState, passTime, markUserMessage, gapSinceUser, adjustMood, describeMood, stageOf, humanGap, agoText, timeOfDay } from "./mood.js";
 import { currentId, getActiveId } from "./profiles.js";
@@ -30,6 +30,64 @@ export async function brainMode() {
 }
 
 /* ------------------------------------ actions */
+
+/* ------------------------------------ stopping mid-reply */
+
+/**
+ * Her latest reply as it was logged. If you send something important while she's typing it,
+ * the page shows only part of it; the rest is taken back out of the log and short-term memory.
+ */
+let lastReply = null;
+
+/** What she was about to say but didn't send, so the next turn can pick it up or let it go */
+let draft = null;
+const DRAFT_TTL_MS = 10 * 60000;
+
+/** Remembers a reply that was just logged, so the page can cut it short */
+function recordReply(bubbles, logged) {
+    lastReply = { bubbles: [ ...bubbles ], logged, profileId: currentId(), transcriptIndex: transcript.length - 1 };
+}
+
+/**
+ * Keeps only the bubbles the page actually showed. The rest becomes a draft she knows she didn't send.
+ * @param {number} shown how many bubbles appeared on screen
+ * @param {string[]} expected the bubbles the page was given, so an old or foreign request changes nothing
+ * @returns {Promise<boolean>}
+ */
+export const cutLastReply = (shown, expected) =>
+    withLock(async () => {
+        const reply = lastReply;
+        if (!reply || reply.profileId !== currentId()) return false;
+        if (JSON.stringify(reply.bubbles) !== JSON.stringify(Array.isArray(expected) ? expected : [])) return false;
+        const n = Math.max(0, Math.min(reply.bubbles.length, Math.floor(Number(shown) || 0)));
+        if (n >= reply.bubbles.length) return false;
+
+        const kept = reply.bubbles.slice(0, n);
+        const dropped = reply.bubbles.slice(n);
+        const turn = transcript[reply.transcriptIndex];
+        if (turn?.role === "assistant") turn.text = kept.join("\n\n") || "(พิมพ์อยู่แล้วหยุดไป ยังไม่ได้ส่งอะไร)";
+
+        const name = await personaName();
+        await replaceLoggedLine(reply.logged, kept.length ? `${reply.logged.line.match(/^\[\d{2}:\d{2}\] /)?.[0] ?? ""}*${name}*: ${bubblesForLog(kept).replace(/\n+/g, " / ")}` : null);
+        draft = { text: dropped, at: Date.now(), profileId: reply.profileId };
+        lastReply = null;
+        return true;
+    });
+
+/** A note for the next turn about the bubbles she never sent, or "" */
+function takeDraftNote() {
+    const d = draft;
+    draft = null;
+    if (!d || d.profileId !== currentId() || Date.now() - d.at > DRAFT_TTL_MS) return { note: "", restore: () => {} };
+    return {
+        note: `ตอนที่แล้วคุณกำลังพิมพ์ต่อว่า "${d.text.join(" / ")}" แต่ยังไม่ได้ส่ง เพราะผู้ใช้ส่งข้อความใหม่แทรกเข้ามา (ผู้ใช้ไม่เห็นส่วนนี้)` +
+            " ตอบเรื่องใหม่ก่อนได้ แล้วจะพูดเรื่องเดิมต่อ เชื่อมกัน หรือทิ้งไปก็ได้ตามธรรมชาติ ถ้าตอบข้อความที่ไม่ใช่อันล่าสุดใช้ [ตอบกลับ \"...\"]",
+        // A failed turn puts the draft back, so a retry still knows
+        restore: () => {
+            draft ??= d;
+        },
+    };
+}
 
 /** Her reaction to the user's latest message, set by the "react" action during a turn */
 let turnReaction = "";
@@ -193,6 +251,8 @@ ${String(style ?? "").trim() || "(ยังไม่มี)"}
 สิ่งที่คุณทำได้:
 - ส่งสติกเกอร์ = ส่ง bubble ที่เป็นอีโมจิตัวเดียวล้วน ๆ (ใช้บ้าง ไม่บ่อย)
 - กดรีแอคที่ข้อความล่าสุดของผู้ใช้ (react) เหมาะกับข้อความที่แค่ต้องรับรู้ เช่น กดใจแล้วไม่ต้องตอบ
+- ตอบกลับข้อความเฉพาะ: ขึ้นต้น bubble ด้วย [ตอบกลับ "ข้อความเดิมสั้น ๆ"] ใช้เมื่อตอบข้อความที่ไม่ใช่อันล่าสุด
+  หรือผู้ใช้ส่งมาหลายเรื่องติดกัน ให้รู้ว่าตอบเรื่องไหน (ไม่ต้องใช้กับข้อความล่าสุด)
 - คุณส่งรูปไม่ได้ ถ้าจะเล่าว่าถ่ายรูปอะไร ให้เล่าเป็นข้อความ ห้ามอ้างว่าส่งรูปไปแล้ว
 </chat_features>
 
@@ -545,11 +605,14 @@ export const chat = (texts, { activity = "", readAgoMs = 0, waitedMs = 0 } = {})
         // Reactions since the last turn ride along with the next message instead of costing a reply each.
         // They go back in the queue if the reply fails, so a retry still sees them.
         const reactions = pendingReactions.splice(0);
+        const draftNote = takeDraftNote();
+        const replyNote = [ replyNoteFor({ activity, readAgoMs, waitedMs }), draftNote.note ].filter(Boolean).join("\n");
         let result;
         try {
-            result = await turn([ ...reactions, ...list ].join("\n"), replyNoteFor({ activity, readAgoMs, waitedMs }));
+            result = await turn([ ...reactions, ...list ].join("\n"), replyNote);
         } catch (err) {
             pendingReactions.unshift(...reactions);
+            draftNote.restore();
             throw err;
         }
 
@@ -569,9 +632,10 @@ export const chat = (texts, { activity = "", readAgoMs = 0, waitedMs = 0 } = {})
                 targetText: last.text,
             });
         }
+        lastReply = null;
         if (result.bubbles.length) {
             lastAgentAt = Date.now();
-            await logTurn("agent", await personaName(), bubblesForLog(result.bubbles));
+            recordReply(result.bubbles, await logTurn("agent", await personaName(), bubblesForLog(result.bubbles)));
         }
         return result;
     });
@@ -614,7 +678,7 @@ export const awayPing = (hours) =>
         if (result.bubbles.length) {
             lastAgentAt = Date.now();
             lastGreetAt = Date.now();
-            await logTurn("agent", await personaName(), bubblesForLog(result.bubbles));
+            recordReply(result.bubbles, await logTurn("agent", await personaName(), bubblesForLog(result.bubbles)));
         }
         return result;
     });
@@ -638,6 +702,8 @@ export function onProfileSwitch() {
 }
 
 async function resetForProfile() {
+    lastReply = null;
+    draft = null;
     transcript.length = 0;
     pendingReactions.length = 0;
     lastGap = null;
@@ -675,7 +741,7 @@ export const greet = () =>
         const result = await turn(`[ระบบ: ${note}]`);
         if (result.bubbles.length) {
             lastAgentAt = Date.now();
-            await logTurn("agent", await personaName(), bubblesForLog(result.bubbles));
+            recordReply(result.bubbles, await logTurn("agent", await personaName(), bubblesForLog(result.bubbles)));
         }
         return result;
     });
@@ -692,7 +758,7 @@ export const nudge = (minutes) =>
         );
         if (result.bubbles.length) {
             lastAgentAt = Date.now();
-            await logTurn("agent", await personaName(), bubblesForLog(result.bubbles));
+            recordReply(result.bubbles, await logTurn("agent", await personaName(), bubblesForLog(result.bubbles)));
         }
         return result;
     });

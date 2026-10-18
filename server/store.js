@@ -354,12 +354,39 @@ export async function todayEntries(limit = 120) {
  */
 export async function logTurn(who, name, text, at = Date.now()) {
     await mkdir(historyDir(), { recursive: true });
-    const file = path.join(historyDir(), `${today()}.md`);
+    const date = today();
+    const file = path.join(historyDir(), `${date}.md`);
     const label = who === "user" ? `**${name}**` : `*${name}*`;
     // User messages keep the time they were sent, not the time she got around to reading them
     const time = new Date(at).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
-    const line = `[${time}] ${label}: ${String(text ?? "").replace(/\n+/g, " / ")}\n\n`;
-    await updateText(file, (current) => `${current || `# บทสนทนา ${today()}\n\n`}${line}`);
+    const line = `[${time}] ${label}: ${String(text ?? "").replace(/\n+/g, " / ")}`;
+    await updateText(file, (current) => `${current || `# บทสนทนา ${date}\n\n`}${line}\n\n`);
+    return { date, line };
+}
+
+/**
+ * Rewrites one line logTurn wrote, e.g. when she stopped typing and some bubbles were never sent.
+ * @param {{ date: string, line: string }} logged what logTurn returned
+ * @param {string | null} replacement the new line, or null to remove it
+ * @returns {Promise<boolean>} true when the line was found
+ */
+export async function replaceLoggedLine(logged, replacement) {
+    if (!logged?.date || !logged?.line) return false;
+    let found = false;
+    await updateText(path.join(historyDir(), `${logged.date}.md`), (current) => {
+        const lines = current.split("\n");
+        const index = lines.lastIndexOf(logged.line);
+        if (index < 0) return null;
+        found = true;
+        if (replacement == null) {
+            // Take the blank line after it too, so the log keeps one empty line between entries
+            lines.splice(index, lines[index + 1] === "" ? 2 : 1);
+        } else {
+            lines[index] = replacement;
+        }
+        return lines.join("\n");
+    });
+    return found;
 }
 
 /**

@@ -58,7 +58,9 @@
 | อ่าน/เขียนไฟล์ .md | `server/store.js` | |
 | เรียก Claude ในเครื่อง / API | `server/llm.js` | |
 | API ของหน้าเว็บ | `server/index.js` | `routes` |
-| จังหวะฝั่งหน้าเว็บ: รวมข้อความที่พิมพ์ต่อกัน, รอผู้ใช้พิมพ์เสร็จ, อ่านแล้ว/ส่งแล้ว, ทักเมื่อเงียบ | `src/main.js` | ส่วน `engine`: `schedule()`, `reply()`, `armIdle()` |
+| จังหวะฝั่งหน้าเว็บ: รวมข้อความที่พิมพ์ต่อกัน, รอผู้ใช้พิมพ์เสร็จ, อ่านแล้ว/ส่งแล้ว, ทักเมื่อเงียบ | `src/main.js` | ส่วน `engine`: `schedule()`, `reply()`, `armIdle()`, `glance()` (จังหวะที่ขึ้น "อ่านแล้ว") |
+| ข้อความแบบไหนทำให้เธอหยุดพิมพ์ | `src/interrupt.js` | `shouldInterrupt()` |
+| หยุดพิมพ์กลางคัน: ตัดคำตอบให้เหลือเฉพาะที่โผล่, ร่างที่ยังไม่ได้ส่ง | `src/main.js` (`speak()`, `cutReply()`) + `server/brain.js` | `cutLastReply()`, `takeDraftNote()`, route `/api/cut` |
 | หน้าตาแชท / สถานะ | `src/components/chat.js` | |
 | หน้าตาแถบสอน | `src/components/teach.js` | |
 | หน้าตาโหมด editlogic | `src/components/logic.js` | |
