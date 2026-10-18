@@ -33,6 +33,7 @@
 | ตัวละครทักมาตอนปิดแชท, ตอบข้อความที่ค้างตอนปิดแชท, แท็บ/เครื่องที่ใช้งานอยู่ | `server/away.js` | ค่าคงที่ด้านบน, `answerWhileClosed()`, `startAwayScheduler()` |
 | ข้อความที่ส่งแล้วแต่เธอยังไม่ตอบ (กันหายตอนรีเฟรช) | `server/store.js` + `server/index.js` | `addPending()`, `replyToPending()`, route `/api/send` |
 | รูป, สติกเกอร์, ตอบกลับ, รีแอคชัน (ฝั่งสมอง) | `server/brain.js` | `<chat_features>` ใน `stablePrompt`, `turn()`, `addReaction()` |
+| เก็บรีแอคชันในประวัติแชท (บรรทัด "รีแอค … โดย … ที่ข้อความ …" ใน log ของวันนั้น) | `server/store.js` | `logReaction()`, `parseEntries()` (คืน `reactions` ต่อ bubble) |
 | รูป, สติกเกอร์, ตอบกลับ, รีแอคชัน (ฝั่งหน้าเว็บ) | `src/components/chat.js` | `bubble()`, `parseMessage()`, `STICKERS`, `REACTIONS` |
 | ค้นหา, ดูรูปเต็ม, "เปิดอยู่ที่อื่น" | `src/components/overlays.js` | |
 | เข้าจากเครื่องอื่น (LAN, Cloudflare Tunnel), รหัสเข้า, กันเดารหัส | `server/index.js` + `server/gate.js` | `accessGate()`, `isLocal()`, `LOCAL_ONLY` — ห้ามทำให้คำขอผ่าน tunnel ถูกนับเป็น local |

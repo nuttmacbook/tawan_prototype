@@ -316,9 +316,18 @@ const routes = {
 
     /* ---------- chat extras */
 
+    // She notices the reaction next turn, and it is saved in the day's log so it's still there after a refresh
     "POST /api/react": async (body) => {
-        addReaction(body?.emoji, body?.text);
-        return { ok: true };
+        addReaction(body?.emoji, String(body?.text ?? "").replace(/\[รูป:[^\]]+\]/g, "📷").trim());
+        const saved = await store.logReaction({
+            by: "user",
+            name: "ผู้ใช้",
+            emoji: body?.emoji,
+            targetTime: body?.time,
+            targetText: body?.text,
+            date: body?.date,
+        });
+        return { ok: true, saved };
     },
 
     "GET /api/search": async (_, url) => ({ results: await store.searchHistory(url.searchParams.get("q")) }),

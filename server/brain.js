@@ -2,7 +2,7 @@ import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import {
     loadTexts, loadRecentHistory, remember, teach, replaceMemoryIf, readMemoryFile,
-    pastHistoryFiles, archiveHistory, appendJournal, loadSettings, logTurn, bubblesForLog, uploadsDir, todayEntries,
+    pastHistoryFiles, archiveHistory, appendJournal, loadSettings, logTurn, logReaction, bubblesForLog, uploadsDir, todayEntries,
 } from "./store.js";
 import { loadState, passTime, markUserMessage, gapSinceUser, adjustMood, describeMood, stageOf, humanGap, agoText, timeOfDay } from "./mood.js";
 import { currentId, getActiveId } from "./profiles.js";
@@ -558,6 +558,17 @@ export const chat = (texts, { activity = "", readAgoMs = 0, waitedMs = 0 } = {})
         lastUserAt = Date.now();
         await markUserMessage(Date.now(), items.length);
         for (const t of items) await logTurn("user", "ผู้ใช้", t.text, t.sentAt);
+        // Her reaction goes on the last message of the batch, the same one the page shows it on
+        if (result.reaction) {
+            const last = items.at(-1);
+            await logReaction({
+                by: "agent",
+                name: await personaName(),
+                emoji: result.reaction,
+                targetTime: new Date(last.sentAt).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }),
+                targetText: last.text,
+            });
+        }
         if (result.bubbles.length) {
             lastAgentAt = Date.now();
             await logTurn("agent", await personaName(), bubblesForLog(result.bubbles));

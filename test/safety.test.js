@@ -143,3 +143,19 @@ test("unsend: finds a message logged yesterday (answered after midnight)", async
     await writeFile(path.join(store.historyDir(), `${yesterday}.md`), "# x\n\n[23:59] **ผู้ใช้**: ฝันดี\n");
     assert.equal(await store.unsendFromHistory("ฝันดี", "23:59"), true);
 });
+
+/* ------------------------------------ reactions */
+
+test("reactions: saved in the day's log and read back on the right bubble", async () => {
+    const day = new Date().toLocaleDateString("sv-SE");
+    await writeFile(path.join(store.historyDir(), `${day}.md`), "# x\n\n[10:00] **ผู้ใช้**: ไปไหนมา\n\n[10:01] *ตะวัน*: ตลาดมา / ซื้อขนมด้วย\n\n");
+    // The page showed her bubble a minute after the logged time
+    assert.equal(await store.logReaction({ by: "user", name: "ผู้ใช้", emoji: "😂", targetTime: "10:02", targetText: "ซื้อขนมด้วย" }), true);
+    assert.equal(await store.logReaction({ by: "user", name: "ผู้ใช้", emoji: "❤️", targetTime: "10:02", targetText: "ซื้อขนมด้วย" }), true);
+    assert.equal(await store.logReaction({ by: "agent", name: "ตะวัน", emoji: "👍", targetTime: "10:00", targetText: "ไปไหนมา" }), true);
+    assert.equal(await store.logReaction({ by: "user", name: "ผู้ใช้", emoji: "😮", targetTime: "10:01", targetText: "ไม่มีข้อความนี้" }), false);
+
+    const entries = await store.todayEntries();
+    assert.deepEqual(entries.map((e) => e.reactions), [ [ "👍" ], [ "", "❤️" ] ]);
+    assert.equal(entries.length, 2);
+});

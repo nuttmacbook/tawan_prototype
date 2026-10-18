@@ -57,7 +57,7 @@ export const api = {
     snapshots: () => call("/api/snapshots"),
     createSnapshot: () => call("/api/snapshots/create", {}),
     restoreSnapshot: (id) => call("/api/snapshots/restore", { id }),
-    react: (emoji, text) => call("/api/react", { emoji, text }),
+    react: (emoji, text, time, date) => call("/api/react", { emoji, text, time, date }),
     search: (q) => call(`/api/search?q=${encodeURIComponent(q)}`),
     upload: (data) => call("/api/upload", { data }),
     rotateKey: () => call("/api/remote/rotate", {}),

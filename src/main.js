@@ -1194,7 +1194,8 @@ if (typeof window !== "undefined") {
         }
         window.closePopovers();
         try {
-            await api.react(emoji, previewOf(row?.dataset?.raw ?? ""));
+            // The bubble's own text and time let the server find the message in the log and save the reaction there
+            await api.react(emoji, row?.dataset?.raw ?? "", row?.dataset?.time ?? "", row?.dataset?.date ?? "");
         } catch {}
     };
 
@@ -1452,8 +1453,8 @@ async function loadOlder() {
         state.oldestDate = date;
         const html = divider(dayLabel(date)) + (entries ?? []).map((e, i) => {
             const parts = e.who === "agent" ? String(e.text).split(" / ") : [ e.text ];
-            const options = { id: `d${date}-${i}`, time: e.time, receipt: e.who === "user" ? "อ่านแล้ว" : "", canUnsend: false };
-            return parts.filter(Boolean).map((p) => bubble(e.who, p, options)).join("");
+            const options = { id: `d${date}-${i}`, time: e.time, date, receipt: e.who === "user" ? "อ่านแล้ว" : "", canUnsend: false };
+            return parts.map((p, k) => (p ? bubble(e.who, p, { ...options, reaction: e.reactions?.[k] ?? "" }) : "")).join("");
         }).join("");
 
         const before = box.scrollHeight;
@@ -1545,7 +1546,10 @@ async function boot() {
         history.forEach((entry, i) => {
             const parts = entry.who === "agent" ? String(entry.text).split(" / ") : [ entry.text ];
             const options = { id: `h${i}`, time: entry.time, receipt: entry.who === "user" ? "อ่านแล้ว" : "" };
-            parts.filter(Boolean).forEach((p) => messagesEl()?.insertAdjacentHTML("beforeend", bubble(entry.who, p, options)));
+            // Index k stays the bubble's position in the log line, which is what saved reactions point at
+            parts.forEach((p, k) => {
+                if (p) messagesEl()?.insertAdjacentHTML("beforeend", bubble(entry.who, p, { ...options, reaction: entry.reactions?.[k] ?? "" }));
+            });
         });
         // Messages you sent that she hasn't answered yet: still waiting, even after a refresh
         for (const m of data?.pending ?? []) {

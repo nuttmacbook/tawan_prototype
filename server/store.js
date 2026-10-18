@@ -376,12 +376,97 @@ export const bubblesForLog = (bubbles) =>
 
 const DAY_FILE = /^\d{4}-\d{2}-\d{2}\.md$/;
 
-const parseEntries = (text) =>
-    String(text ?? "")
-        .split("\n")
-        .map((l) => l.match(/^\[(\d{2}:\d{2})\] (\*\*|\*)(.+?)\2: (.*)$/))
-        .filter(Boolean)
-        .map(([ , time, mark, , body ]) => ({ who: mark === "**" ? "user" : "agent", time, text: body }));
+const MESSAGE_LINE = /^\[(\d{2}:\d{2})\] (\*\*|\*)(.+?)\2: (.*)$/;
+// "[07:05] รีแอค ❤️ โดย **ผู้ใช้** ที่ข้อความ [07:04] "ไปไหนมา"": kept in the day's log so a reaction
+// survives a refresh, travels with exports and snapshots, and she reads it as part of the chat
+const REACTION_LINE = /^\[(\d{2}:\d{2})\] รีแอค (\S+) โดย (\*\*|\*)(.+?)\3 ที่ข้อความ \[(\d{2}:\d{2})\] "(.*)"$/;
+
+/** The bubbles a log entry is drawn as: her lines hold several bubbles split by " / ", yours are one */
+const bubblesOf = (entry) => (entry.who === "agent" ? String(entry.text).split(" / ") : [ entry.text ]);
+
+/**
+ * Chat entries from a day's log, each with the reactions on it:
+ * `reactions[i]` is the emoji on bubble i (latest reaction wins).
+ */
+const parseEntries = (text) => {
+    const entries = [];
+    for (const line of String(text ?? "").split("\n")) {
+        const m = line.match(MESSAGE_LINE);
+        if (m) {
+            entries.push({ who: m[2] === "**" ? "user" : "agent", time: m[1], text: m[4], reactions: [] });
+            continue;
+        }
+        const r = line.match(REACTION_LINE);
+        if (!r) continue;
+        // A reaction by the user lands on her message, and hers on the user's
+        const targetWho = r[3] === "**" ? "agent" : "user";
+        for (let i = entries.length - 1; i >= 0; i--) {
+            const e = entries[i];
+            if (e.who !== targetWho || e.time !== r[5]) continue;
+            const index = bubblesOf(e).indexOf(r[6]);
+            if (index < 0) continue;
+            e.reactions[index] = r[2];
+            break;
+        }
+    }
+    // No holes: bubbles without a reaction get "" so the list reads the same in JSON and in code
+    return entries.map((e) => ({ ...e, reactions: Array.from(e.reactions, (x) => x ?? "") }));
+};
+
+/** How one bubble is written in the log, so a reaction can find it again */
+const logTextOf = (who, text) =>
+    who === "agent"
+        ? bubblesForLog([ text ])
+        : String(text ?? "").replace(/\n+/g, " / ");
+
+/**
+ * Saves a reaction into the log of the day its message is in.
+ * @param {{ by: "user" | "agent", name: string, emoji: string, targetTime: string, targetText: string, date?: string }} reaction
+ *   date: the day of the message; without it, today and then yesterday are tried
+ * @returns {Promise<boolean>} false when the message isn't in any log (nothing is saved then)
+ */
+export async function logReaction({ by, name, emoji, targetTime, targetText, date = "" }) {
+    const e = String(emoji ?? "").trim().replace(/\s+/g, "").slice(0, 8);
+    const time = String(targetTime ?? "");
+    if (!e || !/^\d{2}:\d{2}$/.test(time)) return false;
+    const targetWho = by === "user" ? "agent" : "user";
+    const text = logTextOf(targetWho, targetText).trim();
+    if (!text) return false;
+
+    const yesterday = new Date(Date.now() - 86400000).toLocaleDateString("sv-SE");
+    const days = /^\d{4}-\d{2}-\d{2}$/.test(String(date)) ? [ date ] : [ today(), yesterday ];
+    const label = by === "user" ? `**${name}**` : `*${String(name).replace(/\*/g, "")}*`;
+
+    for (const day of days) {
+        // Older days may already be archived
+        for (const file of [ path.join(historyDir(), `${day}.md`), path.join(archiveDir(), `${day}.md`) ]) {
+            let saved = false;
+            await updateText(file, (current) => {
+                const target = findTarget(parseEntries(current), targetWho, time, text);
+                if (!target) return null;
+                saved = true;
+                // The log's own time for that message, so reading it back is an exact match
+                return `${current.trimEnd()}\n\n[${clock()}] รีแอค ${e} โดย ${label} ที่ข้อความ [${target.time}] "${text}"\n\n`;
+            });
+            if (saved) return true;
+        }
+    }
+    return false;
+}
+
+const minutesOf = (hhmm) => Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3, 5));
+const NEAR_MINUTES = 10;
+
+/**
+ * The message a reaction is for. The page shows her bubbles at the time they appeared,
+ * which can be a minute or two after the time in the log, so a close time with the same text counts.
+ */
+function findTarget(entries, who, time, text) {
+    const same = entries.filter((x) => x.who === who && bubblesOf(x).includes(text));
+    return same.findLast((x) => x.time === time)
+        ?? same.findLast((x) => Math.abs(minutesOf(x.time) - minutesOf(time)) <= NEAR_MINUTES)
+        ?? null;
+}
 
 /**
  * The closest day before `before` that has messages, from today's folder or the archive.
