@@ -1,4 +1,5 @@
 import { esc, CARD, EYEBROW, BTN, BTN_GHOST } from "./ui.js";
+import { findLinks } from "../links.js";
 
 const MOOD_STYLE = {
     "ดีใจ":    { icon: "😊", bar: "bg-amber-400" },
@@ -24,8 +25,6 @@ const IMAGE_TOKEN = /\[รูป:([a-z0-9]+\.(?:jpg|png|webp|gif))\]/g;
 // A picture from her own photos folder (data/personas/<id>/photos/), sent by her
 const HER_PHOTO = /\[รูปเธอ:([^\]\/\\]{1,120})\]/g;
 // http(s) only; trailing punctuation stays outside the link
-const URL_IN_TEXT = /https?:\/\/[^\s<>"']+[^\s<>"'.,!?)\]]/g;
-
 /**
  * Text with web links made clickable. Every piece is escaped on its own, so a link can't
  * smuggle markup in, and links open in a new tab without access back to this page.
@@ -34,10 +33,10 @@ const withLinks = (text) => {
     const s = String(text ?? "");
     let out = "";
     let last = 0;
-    for (const m of s.matchAll(URL_IN_TEXT)) {
-        out += esc(s.slice(last, m.index));
-        out += `<a href="${esc(m[0])}" target="_blank" rel="noopener noreferrer nofollow" onclick="event.stopPropagation()" class="break-all underline decoration-current/50 underline-offset-2">${esc(m[0])}</a>`;
-        last = m.index + m[0].length;
+    for (const { url, index } of findLinks(s)) {
+        out += esc(s.slice(last, index));
+        out += `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer nofollow" onclick="event.stopPropagation()" class="break-all underline decoration-current/50 underline-offset-2">${esc(url)}</a>`;
+        last = index + url.length;
     }
     return out + esc(s.slice(last));
 };

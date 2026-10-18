@@ -109,3 +109,13 @@ test("selectMemory: old small things fade, who you are doesn't", () => {
     // 0 = remember everything
     assert.equal(selectMemory(memory, "", 3500, { fadeDays: 0, now }).text, memory);
 });
+
+test("links: Thai right after a link and a closing bracket in a link", () => {
+    assert.deepEqual(world.linksIn("ฟังนี่https://youtu.be/abcเพลงดีมาก"), [ "https://youtu.be/abc" ]);
+    assert.deepEqual(world.linksIn("ดู https://en.wikipedia.org/wiki/Foo_(band) ดิ"), [ "https://en.wikipedia.org/wiki/Foo_(band)" ]);
+    const out = world.checkShared([ "ลองฟัง https://youtu.be/abcน่ารักมาก", "https://en.wikipedia.org/wiki/Foo_(band)" ], {
+        links: [ "https://youtu.be/abc", "https://en.wikipedia.org/wiki/Foo_(band)" ],
+    });
+    assert.deepEqual(out.bubbles, [ "ลองฟัง https://youtu.be/abcน่ารักมาก", "https://en.wikipedia.org/wiki/Foo_(band)" ]);
+    assert.deepEqual(world.photosIn([ "[รูปเธอ:ทะเล.jpg] สวย", "ไม่มี" ]), [ "ทะเล.jpg" ]);
+});

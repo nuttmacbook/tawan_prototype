@@ -98,8 +98,13 @@ export function humanizeReply(bubbles, style, { allowTypo = true } = {}) {
     const unsend = [];
     let out = (Array.isArray(bubbles) ? bubbles : []).map((b) => {
         let t = String(b ?? "").trim();
-        // Not the silk kind: ผ้าไหม, เส้นไหม, หนอนไหม are words, not the question particle
-        if (s.maiToMai) t = t.replace(/(?<!ผ้า|เส้น|หนอน|ใย)ไหม(?=$|[\s?!.,)])/g, "มั้ย");
+        // Not the silk kind: ผ้าไหม, เส้นไหม, หนอนไหม are words, not the question particle.
+        // Never inside [ส่งรูป:...] / [ตอบกลับ "..."] or a link: a photo name or address must stay exact
+        if (s.maiToMai) {
+            t = t.split(/(\[[^\]]*\]|https?:\/\/\S+)/)
+                .map((part, i) => (i % 2 ? part : part.replace(/(?<!ผ้า|เส้น|หนอน|ใย)ไหม(?=$|[\s?!.,)])/g, "มั้ย")))
+                .join("");
+        }
         if (s.dropPolite) t = t.replace(/\s*(นะ)?(ค่ะ|คะ|ครับ)(?=[\s?!.]*$)/, (_, na) => (na ? "นะ" : ""));
         if (s.dropPeriod) t = t.replace(/(?<!\.)\.$/, "");
         if (s.calmBang) {

@@ -8,6 +8,7 @@ import { loadState, adjustMood } from "./mood.js";
 import { writeDiary } from "./life.js";
 import { personaHabits, isAsleepAt } from "./pacing.js";
 import { getConfig } from "./config.js";
+import { findLinks } from "../src/links.js";
 
 /* ------------------------------------ her day, grounded in the real world */
 
@@ -96,6 +97,15 @@ export const markPhotoSent = (name) =>
     changeLife((life) => {
         life.sentPhotos = [ ...(life.sentPhotos ?? []).filter((n) => n !== name), name ].slice(-MAX_SENT_PHOTOS);
     });
+
+export const unmarkPhotoSent = (name) =>
+    changeLife((life) => {
+        life.sentPhotos = (life.sentPhotos ?? []).filter((n) => n !== name);
+    });
+
+/** Her photo names in bubbles ("[รูปเธอ:name]") */
+export const photosIn = (bubbles) =>
+    (bubbles ?? []).flatMap((b) => [ ...String(b ?? "").matchAll(/\[รูปเธอ:([^\]]+)\]/g) ].map((m) => m[1]));
 
 /** The file behind a photo name, only if it really is one of hers (no paths, no other folders) */
 export async function photoFile(name) {
@@ -308,11 +318,23 @@ export function renderToday(info, name = "เธอ") {
 
 /* ------------------------------------ what she may put in a bubble */
 
-export const URL_PATTERN = /https?:\/\/[^\s<>"']+[^\s<>"'.,!?)\]]/g;
 const SEND_PHOTO = /\[ส่งรูป\s*[:：]\s*([^\]\n]{1,120})\]/g;
 
 /** Links in a text, e.g. the ones you sent her this turn */
-export const linksIn = (text) => [ ...String(text ?? "").matchAll(URL_PATTERN) ].map((m) => m[0]);
+export const linksIn = (text) => findLinks(text).map((l) => l.url);
+
+/** Takes out every link not in the allowed set; returns the text and what was removed */
+function keepLinks(text, okLinks, dropped) {
+    let out = "";
+    let last = 0;
+    for (const { url, index } of findLinks(text)) {
+        out += text.slice(last, index);
+        if (okLinks.has(url)) out += url;
+        else dropped.push(url);
+        last = index + url.length;
+    }
+    return out + text.slice(last);
+}
 
 /**
  * Her bubbles made safe to show: a link she didn't really find (today's look-up) or get from you
@@ -329,11 +351,7 @@ export function checkShared(bubbles, { links = [], photos = [] } = {}) {
     const dropped = [];
     const out = [];
     for (const raw of bubbles ?? []) {
-        let text = String(raw ?? "").replace(URL_PATTERN, (u) => {
-            if (okLinks.has(u)) return u;
-            dropped.push(u);
-            return "";
-        });
+        let text = keepLinks(String(raw ?? ""), okLinks, dropped);
         text = text.replace(SEND_PHOTO, (_, name) => {
             const clean = name.trim();
             if (okPhotos.has(clean) && !sent.includes(clean)) {
