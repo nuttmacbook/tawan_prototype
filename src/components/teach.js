@@ -169,7 +169,7 @@ const snapshotList = (snapshots) => {
         <div class="flex items-center gap-2 text-xs">
             <span class="shrink-0 font-mono tabular-nums text-slate-500">${esc(x.id.slice(5, 16).replace(/^(\d{2})-(\d{2})-(\d{2})-(\d{2})$/, "$1/$2 $3:$4"))}</span>
             <span class="min-w-0 flex-1 truncate text-slate-300" title="${esc(x.label)}">${esc(x.label)}</span>
-            <button type="button" onclick="restoreSnapshot('${esc(x.id)}')" class="shrink-0 rounded-lg px-2 py-0.5 text-sky-300 hover:bg-sky-500/10">ย้อน</button>
+            <button type="button" data-id="${esc(x.id)}" onclick="restoreSnapshot(this.dataset.id)" class="shrink-0 rounded-lg px-2 py-0.5 text-sky-300 hover:bg-sky-500/10">ย้อน</button>
         </div>
     `).join("");
 };

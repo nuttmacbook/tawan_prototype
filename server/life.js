@@ -1,4 +1,4 @@
-import { writeFile } from "node:fs/promises";
+import { updateText } from "./fsutil.js";
 import { FILES, safeRead, today, appendToSection, lastSections, splitSections, sectionTitle, remember } from "./store.js";
 
 /* ------------------------------------ threads (เรื่องค้าง) */
@@ -33,14 +33,16 @@ export async function loadThreads() {
  * @param {string} [askOn] YYYY-MM-DD; defaults to today
  */
 export async function addThread(about, askOn) {
-    const text = String(about ?? "").trim();
+    const text = String(about ?? "").replace(/[\r\n]+/g, " ").trim();
     if (!text) return "ไม่มีเรื่องให้จด";
     const date = isDate(askOn) ? askOn : today();
-    if ((await loadThreads()).some((t) => t.about === text)) return `มีเรื่องค้างนี้อยู่แล้ว: ${text}`;
-
-    const current = (await safeRead(FILES.threads)) || THREADS_HEAD;
-    await writeFile(FILES.threads, `${current.trimEnd()}\n- [ ] ${today()} | ถามได้: ${date} | ${text}\n`);
-    return `จดเรื่องค้าง: ${text} (ถามได้ ${date})`;
+    let isDuplicate = false;
+    await updateText(FILES.threads, (current) => {
+        isDuplicate = current.split("\n").some((l) => l.match(THREAD_LINE)?.[3]?.trim() === text);
+        if (isDuplicate) return null;
+        return `${(current || THREADS_HEAD).trimEnd()}\n- [ ] ${today()} | ถามได้: ${date} | ${text}\n`;
+    });
+    return isDuplicate ? `มีเรื่องค้างนี้อยู่แล้ว: ${text}` : `จดเรื่องค้าง: ${text} (ถามได้ ${date})`;
 }
 
 /**
@@ -52,13 +54,18 @@ export async function closeThread(keyword, outcome = "") {
     const word = String(keyword ?? "").trim();
     if (!word) return "ต้องบอกว่าปิดเรื่องไหน";
 
-    const lines = (await safeRead(FILES.threads)).split("\n");
-    const index = lines.findIndex((l) => THREAD_LINE.test(l) && l.includes(word));
-    if (index < 0) return `ไม่พบเรื่องค้างที่มีคำว่า "${word}"`;
-
-    const about = lines[index].match(THREAD_LINE)?.[3]?.trim() ?? word;
-    lines.splice(index, 1);
-    await writeFile(FILES.threads, lines.join("\n"));
+    let about = "";
+    await updateText(FILES.threads, (current) => {
+        const lines = current.split("\n");
+        // Prefer the thread whose text matches exactly; otherwise the first one containing the keyword
+        const open = lines.map((l, i) => ({ i, about: l.match(THREAD_LINE)?.[3]?.trim() })).filter((x) => x.about);
+        const hit = open.find((x) => x.about === word) ?? open.find((x) => x.about.includes(word));
+        if (!hit) return null;
+        about = hit.about;
+        lines.splice(hit.i, 1);
+        return lines.join("\n");
+    });
+    if (!about) return `ไม่พบเรื่องค้างที่มีคำว่า "${word}"`;
 
     const result = String(outcome ?? "").trim();
     if (result) await remember("เหตุการณ์ในชีวิตผู้ใช้", `${about} → ${result}`);
@@ -75,7 +82,7 @@ const DIARY_HEAD = [
 ].join("\n");
 
 export async function writeDiary(entry) {
-    const text = String(entry ?? "").trim();
+    const text = String(entry ?? "").replace(/[\r\n]+/g, " ").trim();
     if (!text) return "ไม่มีอะไรให้จด";
     await appendToSection(FILES.diary, today(), `- ${text}`, { fallbackHead: DIARY_HEAD });
     return `จดไดอารี่: ${text}`;

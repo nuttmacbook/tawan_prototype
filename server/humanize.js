@@ -78,7 +78,8 @@ export function humanize(bubbles, style, { allowTypo = true } = {}) {
     const s = styleSettings(style);
     let out = (Array.isArray(bubbles) ? bubbles : []).map((b) => {
         let t = String(b ?? "").trim();
-        if (s.maiToMai) t = t.replace(/ไหม(?=$|[\s?!.,)])/g, "มั้ย");
+        // Not the silk kind: ผ้าไหม, เส้นไหม, หนอนไหม are words, not the question particle
+        if (s.maiToMai) t = t.replace(/(?<!ผ้า|เส้น|หนอน|ใย)ไหม(?=$|[\s?!.,)])/g, "มั้ย");
         if (s.dropPolite) t = t.replace(/\s*(นะ)?(ค่ะ|คะ|ครับ)(?=[\s?!.]*$)/, (_, na) => (na ? "นะ" : ""));
         if (s.dropPeriod) t = t.replace(/(?<!\.)\.$/, "");
         if (s.calmBang) {

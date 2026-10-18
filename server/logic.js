@@ -139,11 +139,22 @@ const run = {
     isRunning: false,
     sessionId: null,
     events: [],
+    seq: 0,
     changed: [],
     backupId: null,
 };
 
-const emit = (e) => run.events.push({ i: run.events.length, at: Date.now(), ...e });
+// A long session would otherwise keep every line it ever printed in memory
+const MAX_EVENTS = 1000;
+
+const emit = (e) => {
+    run.events.push({ i: run.seq++, at: Date.now(), ...e });
+    if (run.events.length > MAX_EVENTS) run.events.splice(0, run.events.length - MAX_EVENTS);
+};
+
+/** Files editlogic may change; anything else it touched is reported as a warning */
+const isCodePath = (rel) =>
+    CODE_FILES.includes(rel) || CODE_DIRS.some((d) => rel.startsWith(`${d}/`));
 
 /** Child env without API keys, so the run uses the Claude Code login on this PC */
 const ccEnv = () => {
@@ -198,8 +209,14 @@ export async function startLogicRun(prompt) {
 
     run.isRunning = true;
     run.changed = [];
-    run.backupId = await backup(`ก่อนสั่ง: ${text}`);
-    const startIndex = run.events.length;
+    try {
+        run.backupId = await backup(`ก่อนสั่ง: ${text}`);
+    } catch (err) {
+        // Without a backup there's no way back, so don't start; and don't stay stuck as "running"
+        run.isRunning = false;
+        throw new Error(`สำรองโค้ดก่อนแก้ไม่สำเร็จ จึงยังไม่เริ่ม: ${err?.message ?? err}`);
+    }
+    const startIndex = run.seq;
     emit({ kind: "user", text });
 
     const args = [
@@ -213,6 +230,9 @@ export async function startLogicRun(prompt) {
         // Variadic flags go last; the prompt arrives on stdin
         "--tools", LOGIC_TOOLS,
         "--allowedTools", LOGIC_TOOLS,
+        // Enforced by Claude Code itself, not just asked for in the prompt: characters' data,
+        // the API key and installed packages are off limits (an Edit rule covers Write too)
+        "--disallowedTools", "Edit(./data/**)", "Read(./.env)", "Edit(./.env)", "Edit(./node_modules/**)",
     ];
 
     const child = isWin
@@ -236,6 +256,8 @@ export async function startLogicRun(prompt) {
     });
     child.on("close", (code) => {
         if (buffer.trim()) handleLine(buffer);
+        const outside = run.changed.filter((f) => !isCodePath(f));
+        if (outside.length) emit({ kind: "error", text: `⚠ มีการแก้ไฟล์นอกโค้ดระบบ: ${outside.join(", ")} (ตรวจดูเองด้วย ระบบย้อนกลับให้เฉพาะโค้ด)` });
         if (code !== 0 && !run.events.some((e) => e.kind === "done" && e.i >= startIndex)) {
             emit({ kind: "error", text: stderr.trim().slice(0, 400) || `จบด้วยรหัส ${code}` });
         }
@@ -253,7 +275,7 @@ export const logicState = (since = 0) => ({
     isRunning: run.isRunning,
     hasSession: Boolean(run.sessionId),
     events: run.events.filter((e) => e.i >= since),
-    next: run.events.length,
+    next: run.seq,
 });
 
 export function resetLogicSession() {
@@ -261,5 +283,8 @@ export function resetLogicSession() {
     run.sessionId = null;
     run.events = [];
 }
+
+/** True while editlogic is working, so the page and the runner can wait before restarting */
+export const isLogicRunning = () => run.isRunning;
 
 export { LOGIC_MODEL };

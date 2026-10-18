@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
-import { mkdir, writeFile, copyFile, readdir, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile, copyFile, rm } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
-import { DATA_DIR } from "./store.js";
 
 /* ------------------------------------ config */
 
@@ -11,8 +11,9 @@ const CLAUDE_BIN = process.env.CLAUDE_BIN || "claude";
 const CC_TIMEOUT_MS = 180000;
 const isWin = process.platform === "win32";
 
-// An empty folder to run Claude Code in, so it doesn't pick up this project's CLAUDE.md or .mcp.json
-const BRAIN_DIR = path.join(DATA_DIR, ".brain");
+// Claude Code runs in an empty folder outside the project. Inside the project it would also read
+// CLAUDE.md from the parent folders (the editlogic manual) and treat it as part of her instructions.
+const BRAIN_ROOT = path.join(os.tmpdir(), "persona-agent-brain");
 
 /* ------------------------------------ Claude Code (local login) */
 
@@ -30,16 +31,22 @@ const ccEnv = () => {
 /** Quotes an argument for cmd.exe; npm-installed `claude` is a .cmd shim that needs a shell on Windows */
 const quoteWin = (a) => (/[\s"&|<>^*()]/.test(a) ? `"${a.replace(/"/g, '""')}"` : a);
 
-function runProcess(args, { input = "", timeout = CC_TIMEOUT_MS } = {}) {
+/** On Windows the child is cmd.exe; killing only that would leave claude running and billing */
+function killTree(child) {
+    if (!isWin || !child?.pid) return child?.kill("SIGINT");
+    spawn("taskkill", [ "/pid", String(child.pid), "/T", "/F" ], { stdio: "ignore" }).on("error", () => child.kill());
+}
+
+function runProcess(args, { input = "", timeout = CC_TIMEOUT_MS, cwd = BRAIN_ROOT } = {}) {
     return new Promise((resolve, reject) => {
         const child = isWin
-            ? spawn([ CLAUDE_BIN, ...args ].map(quoteWin).join(" "), { cwd: BRAIN_DIR, env: ccEnv(), shell: true })
-            : spawn(CLAUDE_BIN, args, { cwd: BRAIN_DIR, env: ccEnv() });
+            ? spawn([ CLAUDE_BIN, ...args ].map(quoteWin).join(" "), { cwd, env: ccEnv(), shell: true })
+            : spawn(CLAUDE_BIN, args, { cwd, env: ccEnv() });
 
         let out = "";
         let err = "";
         const timer = setTimeout(() => {
-            child.kill("SIGINT");
+            killTree(child);
             reject(new Error("Claude ในเครื่องตอบช้าเกินไป ลองใหม่อีกครั้ง"));
         }, timeout);
 
@@ -64,19 +71,31 @@ function runProcess(args, { input = "", timeout = CC_TIMEOUT_MS } = {}) {
  * @returns {Promise<string>} the model's text
  */
 export async function askClaudeCode({ system, prompt, images = [] }) {
-    await mkdir(BRAIN_DIR, { recursive: true });
-    const systemFile = path.join(BRAIN_DIR, "system.md");
+    // A folder of its own per call: a memory tidy-up running in the background must never
+    // swap its prompt or pictures with the chat reply being written at the same time
+    await mkdir(BRAIN_ROOT, { recursive: true });
+    const dir = await mkdtemp(path.join(BRAIN_ROOT, "run-"));
+    try {
+        return await askIn(dir, { system, prompt, images });
+    } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
+}
+
+async function askIn(dir, { system, prompt, images }) {
+    const systemFile = path.join(dir, "system.md");
     await writeFile(systemFile, system);
 
     // Pictures are copied next to the prompt so Claude can open them with Read, its only tool here
-    for (const old of (await readdir(BRAIN_DIR)).filter((f) => f.startsWith("img-"))) {
-        await rm(path.join(BRAIN_DIR, old), { force: true });
-    }
     const names = [];
     for (const [ i, file ] of images.entries()) {
         const name = `img-${i}${path.extname(file) || ".jpg"}`;
-        await copyFile(file, path.join(BRAIN_DIR, name));
-        names.push(name);
+        try {
+            await copyFile(file, path.join(dir, name));
+            names.push(name);
+        } catch {
+            // A picture that's gone shouldn't block the whole reply
+        }
     }
     const imageNote = names.length
         ? `\n\nผู้ใช้ส่งรูปมา ${names.length} รูป ใช้เครื่องมือ Read เปิดดูไฟล์ ${names.map((n) => `./${n}`).join(", ")} ก่อนตอบ`
@@ -90,11 +109,13 @@ export async function askClaudeCode({ system, prompt, images = [] }) {
         "--max-turns", names.length ? String(2 + names.length) : "2",
         "--no-session-persistence",
         "--strict-mcp-config",
-        // Variadic flags go last; the prompt arrives on stdin, not as an argument
-        ...(names.length ? [ "--tools", "Read", "--allowedTools", "Read" ] : [ "--disallowedTools", "*" ]),
+        // Variadic flags go last; the prompt arrives on stdin, not as an argument.
+        // Read is allowed for the copied pictures only: a bare "Read" would let a crafted persona file
+        // talk her into opening anything on this computer (~/.ssh, .env) and quoting it in chat.
+        ...(names.length ? [ "--tools", "Read", "--allowedTools", "Read(./img-*)" ] : [ "--disallowedTools", "*" ]),
     ];
 
-    const { code, out, err } = await runProcess(args, { input: `${prompt}${imageNote}` });
+    const { code, out, err } = await runProcess(args, { input: `${prompt}${imageNote}`, cwd: dir });
 
     let parsed = null;
     try {
@@ -134,7 +155,7 @@ export const claudeCodeUsage = () => lastUsage;
  */
 export async function claudeCodeStatus() {
     try {
-        await mkdir(BRAIN_DIR, { recursive: true });
+        await mkdir(BRAIN_ROOT, { recursive: true });
         const { code, out } = await runProcess([ "auth", "status" ], { timeout: 15000 });
         let info = {};
         try {

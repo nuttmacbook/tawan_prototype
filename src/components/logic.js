@@ -54,9 +54,9 @@ const logicEvent = (e) => {
                 ${changed.map((f) => `<p class="truncate font-mono text-[11px] text-slate-400">${esc(f)}</p>`).join("")}
                 <div class="flex flex-wrap gap-2 pt-1">
                     ${e.needsRestart
-                        ? `<button type="button" class="${BTN} !py-1.5 text-xs" onclick="restartServer('${esc(e.backupId)}')">↻ รีสตาร์ทให้ใช้โค้ดใหม่</button>`
+                        ? `<button type="button" class="${BTN} !py-1.5 text-xs" data-id="${esc(e.backupId)}" onclick="restartServer(this.dataset.id)">↻ รีสตาร์ทให้ใช้โค้ดใหม่</button>`
                         : changed.length ? `<button type="button" class="${BTN} !py-1.5 text-xs" onclick="location.reload()">↻ โหลดหน้าใหม่</button>` : ""}
-                    ${changed.length ? `<button type="button" class="${BTN_GHOST} !py-1.5 text-xs" onclick="restoreBackup('${esc(e.backupId)}')">↶ ย้อนกลับ</button>` : ""}
+                    ${changed.length ? `<button type="button" class="${BTN_GHOST} !py-1.5 text-xs" data-id="${esc(e.backupId)}" onclick="restoreBackup(this.dataset.id)">↶ ย้อนกลับ</button>` : ""}
                 </div>
             </div>
         `;
@@ -80,7 +80,7 @@ const backupList = (backups) => {
         <div class="flex items-center gap-2 text-xs">
             <span class="shrink-0 font-mono tabular-nums text-slate-500">${esc(b.id.slice(5, 16).replace("T", " "))}</span>
             <span class="min-w-0 flex-1 truncate text-slate-300" title="${esc(b.label)}">${esc(b.label)}</span>
-            <button type="button" onclick="restoreBackup('${esc(b.id)}')" class="shrink-0 rounded-lg px-2 py-0.5 text-sky-300 hover:bg-sky-500/10">ย้อน</button>
+            <button type="button" data-id="${esc(b.id)}" onclick="restoreBackup(this.dataset.id)" class="shrink-0 rounded-lg px-2 py-0.5 text-sky-300 hover:bg-sky-500/10">ย้อน</button>
         </div>
     `).join("");
 };

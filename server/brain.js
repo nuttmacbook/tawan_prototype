@@ -1,10 +1,11 @@
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import {
-    loadTexts, loadRecentHistory, remember, teach, replaceMemory, readMemoryFile,
-    pastHistoryFiles, archiveHistory, appendJournal, loadSettings, logTurn, uploadsDir, todayEntries,
+    loadTexts, loadRecentHistory, remember, teach, replaceMemoryIf, readMemoryFile,
+    pastHistoryFiles, archiveHistory, appendJournal, loadSettings, logTurn, bubblesForLog, uploadsDir, todayEntries,
 } from "./store.js";
-import { loadState, passTime, markUserMessage, adjustMood, describeMood, stageOf, humanGap, agoText, timeOfDay } from "./mood.js";
+import { loadState, passTime, markUserMessage, gapSinceUser, adjustMood, describeMood, stageOf, humanGap, agoText, timeOfDay } from "./mood.js";
+import { currentId, getActiveId } from "./profiles.js";
 import { loadThreads, addThread, closeThread, writeDiary, loadDiary } from "./life.js";
 import { askApi, askClaudeCode, hasApiKey, usageOf, claudeCodeUsage } from "./llm.js";
 import { humanize, userStyleNote, repetitionNote } from "./humanize.js";
@@ -476,11 +477,19 @@ async function turn(userText, replyNote = "") {
     turnReaction = "";
     turnImageNote = "";
 
-    // "[รูป:file]" tokens become real pictures for this turn and a short note in short-term memory
-    const images = [ ...userText.matchAll(IMAGE_TOKEN) ].map((m) => path.join(uploadsDir(), path.basename(m[1])));
+    // "[รูป:file]" tokens become real pictures for this turn and a short note in short-term memory.
+    // A picture that no longer exists (typed by hand, or from another character) is skipped,
+    // otherwise the message could never be answered and would wait forever.
+    const images = [];
+    for (const m of userText.matchAll(IMAGE_TOKEN)) {
+        const file = path.join(uploadsDir(), path.basename(m[1]));
+        if ((await stat(file).catch(() => null))?.isFile()) images.push(file);
+    }
     const plain = userText.replace(IMAGE_TOKEN, "[ผู้ใช้ส่งรูปมา]");
     transcript.push({ role: "user", text: plain });
     try {
+        // Moods drift back to normal between turns, not only when the server starts
+        await passTime();
         const mode = await brainMode();
         const raw = mode === "api" ? await apiTurn(notes, replyNote, images) : await claudeCodeTurn(notes, replyNote, images);
         if (turnImageNote) transcript.at(-1).text = plain.replace("[ผู้ใช้ส่งรูปมา]", `[ผู้ใช้ส่งรูป: ${turnImageNote}]`);
@@ -520,28 +529,49 @@ const replyNoteFor = ({ activity, readAgoMs, waitedMs }) => {
  */
 export const chat = (texts, { activity = "", readAgoMs = 0, waitedMs = 0 } = {}) =>
     withLock(async () => {
+        assertSameProfile();
         // Each item is a plain string or { text, sentAt } from the pending queue
         const items = (Array.isArray(texts) ? texts : [ texts ])
             .map((t) => (t && typeof t === "object" ? t : { text: t }))
             .map((t) => ({ text: String(t.text ?? "").trim(), sentAt: Number(t.sentAt) || Date.now() }))
             .filter((t) => t.text);
         if (!items.length) return { bubbles: [], notes: [] };
-        const list = items.map((t) => t.text);
+        // Only the app may write "[ระบบ: ...]"; the same text typed by the user is marked as theirs
+        const list = items.map((t) => t.text.replace(/\[\s*ระบบ\s*[:：]/g, "[ผู้ใช้พิมพ์ว่า ระบบ:"));
 
-        lastGap = await markUserMessage();
-        lastUserAt = Date.now();
+        lastGap = await gapSinceUser();
         lastReadAt = Date.now();
-        for (const t of items) await logTurn("user", "ผู้ใช้", t.text, t.sentAt);
 
-        // Reactions since the last turn ride along with the next message instead of costing a reply each
+        // Reactions since the last turn ride along with the next message instead of costing a reply each.
+        // They go back in the queue if the reply fails, so a retry still sees them.
         const reactions = pendingReactions.splice(0);
-        const result = await turn([ ...reactions, ...list ].join("\n"), replyNoteFor({ activity, readAgoMs, waitedMs }));
+        let result;
+        try {
+            result = await turn([ ...reactions, ...list ].join("\n"), replyNoteFor({ activity, readAgoMs, waitedMs }));
+        } catch (err) {
+            pendingReactions.unshift(...reactions);
+            throw err;
+        }
+
+        // Logged and counted only once the reply worked: a failed reply is retried later
+        // and must not leave the same message in the log twice
+        lastUserAt = Date.now();
+        await markUserMessage(Date.now(), items.length);
+        for (const t of items) await logTurn("user", "ผู้ใช้", t.text, t.sentAt);
         if (result.bubbles.length) {
             lastAgentAt = Date.now();
-            await logTurn("agent", await personaName(), result.bubbles.join("\n"));
+            await logTurn("agent", await personaName(), bubblesForLog(result.bubbles));
         }
         return result;
     });
+
+/**
+ * Work pinned to one character must not run on another one's short-term memory.
+ * If you switched characters while this message waited, it stays waiting for its own character.
+ */
+function assertSameProfile() {
+    if (currentId() !== getActiveId()) throw new Error("สลับตัวละครไปแล้ว ข้อความนี้จะรอให้กลับมาคุยกับตัวเดิม");
+}
 
 /** Something she should notice next turn without replying to it right away (reactions, unsent messages) */
 function addNote(note) {
@@ -566,29 +596,45 @@ export function noteUnsent(text) {
  */
 export const awayPing = (hours) =>
     withLock(async () => {
+        assertSameProfile();
         const result = await turn(
             `[ระบบ: ผู้ใช้ไม่ได้เปิดแชทมาประมาณ ${Math.round(hours)} ชั่วโมง ตอนนี้ไม่ได้อยู่ในแชท ถ้าตัวละครนึกถึงหรือมีเรื่องอยากเล่า ให้ส่งข้อความสั้น ๆ เหมือนทักหาเพื่อน (เล่าเรื่องในไดอารี่ ถามเรื่องค้าง หรือแค่ทักเล่น) ถ้าไม่มีเหตุให้ทักก็ไม่ต้องทัก]`,
         );
         if (result.bubbles.length) {
             lastAgentAt = Date.now();
             lastGreetAt = Date.now();
-            await logTurn("agent", await personaName(), result.bubbles.join("\n"));
+            await logTurn("agent", await personaName(), bubblesForLog(result.bubbles));
         }
         return result;
     });
 
-/** Forgets everything tied to the previous character so the new one starts clean */
-export async function onProfileSwitch() {
-    await withLock(async () => {
-        transcript.length = 0;
-        pendingReactions.length = 0;
-        lastGap = null;
-        lastGreetAt = 0;
-        lastUserAt = 0;
-        lastAgentAt = 0;
-        lastReadAt = 0;
-        await warmUp();
+/**
+ * Switches characters only between turns: a reply already being written finishes first
+ * and saves into its own character. Then the short-term memory of the old one is cleared.
+ * @param {() => Promise<any>} change the actual switch, e.g. profiles.switchProfile(id)
+ */
+export function switchExclusive(change) {
+    return withLock(async () => {
+        const result = await change();
+        await resetForProfile();
+        return result;
     });
+}
+
+/** Forgets everything tied to the previous character so the new one starts clean */
+export function onProfileSwitch() {
+    return withLock(resetForProfile);
+}
+
+async function resetForProfile() {
+    transcript.length = 0;
+    pendingReactions.length = 0;
+    lastGap = null;
+    lastGreetAt = 0;
+    lastUserAt = 0;
+    lastAgentAt = 0;
+    lastReadAt = 0;
+    await warmUp();
 }
 
 /** Size of what was sent last turn, for the debug meter */
@@ -603,6 +649,7 @@ export const presence = () => ({ lastAgentAt, lastReadAt, lastUserAt });
  */
 export const greet = () =>
     withLock(async () => {
+        assertSameProfile();
         // Refreshing the page or restarting the server mid-conversation shouldn't make her say hello again
         if (Date.now() - Math.max(lastGreetAt, lastUserAt, await lastLoggedAt()) < GREET_COOLDOWN_MS) return { bubbles: [], notes: [] };
         lastGreetAt = Date.now();
@@ -617,7 +664,7 @@ export const greet = () =>
         const result = await turn(`[ระบบ: ${note}]`);
         if (result.bubbles.length) {
             lastAgentAt = Date.now();
-            await logTurn("agent", await personaName(), result.bubbles.join("\n"));
+            await logTurn("agent", await personaName(), bubblesForLog(result.bubbles));
         }
         return result;
     });
@@ -628,12 +675,13 @@ export const greet = () =>
  */
 export const nudge = (minutes) =>
     withLock(async () => {
+        assertSameProfile();
         const result = await turn(
             `[ระบบ: ผู้ใช้เงียบไป ${Math.round(minutes)} นาที ถ้าตัวละครอยากทักก็ทักสั้น ๆ ตามอารมณ์และเวลา ถ้าไม่ควรทัก (เพิ่งบอกลา, ดึกมาก, ทักไปแล้วยังไม่ตอบ) ไม่ต้องทัก]`,
         );
         if (result.bubbles.length) {
             lastAgentAt = Date.now();
-            await logTurn("agent", await personaName(), result.bubbles.join("\n"));
+            await logTurn("agent", await personaName(), bubblesForLog(result.bubbles));
         }
         return result;
     });
@@ -681,7 +729,27 @@ export async function warmUp() {
  * Summarizes each finished day into journal.md, then archives its raw log.
  * @returns {Promise<string[]>} dates that were summarized
  */
-export async function consolidateHistory() {
+// Two tabs opening at once would otherwise summarize the same day twice
+const consolidating = new Map();
+
+export function consolidateHistory() {
+    const id = currentId();
+    if (!consolidating.has(id)) {
+        consolidating.set(id, summarizeDays().finally(() => consolidating.delete(id)));
+    }
+    return consolidating.get(id);
+}
+
+const SUMMARY_HEAD_CHARS = 12000;
+const SUMMARY_TAIL_CHARS = 28000;
+
+/** A long day keeps its beginning and its end; only the middle is cut */
+const forSummary = (text) =>
+    text.length <= SUMMARY_HEAD_CHARS + SUMMARY_TAIL_CHARS
+        ? text
+        : `${text.slice(0, SUMMARY_HEAD_CHARS)}\n\n[… ตัดช่วงกลางวันออก …]\n\n${text.slice(-SUMMARY_TAIL_CHARS)}`;
+
+async function summarizeDays() {
     const days = await pastHistoryFiles();
     if (!days.length) return [];
     const name = await personaName();
@@ -691,13 +759,34 @@ export async function consolidateHistory() {
         const summary = await complete(
             `คุณคือ ${name} เขียนบันทึกความทรงจำของวันนี้จากมุมมองตัวเอง (บุรุษที่ 1) เป็น bullet 3–6 ข้อ ` +
             "เน้น: เกิดอะไรขึ้น ผู้ใช้รู้สึกอย่างไร ความสัมพันธ์เปลี่ยนไปไหม เรื่องที่ควรจำ ตอบเฉพาะ bullet ไม่ต้องมีคำเกริ่น",
-            String(await readFile(file, "utf8")).slice(-40000),
+            forSummary(String(await readFile(file, "utf8"))),
         );
         if (summary) await appendJournal(date, summary);
         await archiveHistory(file);
         done.push(date);
     }
     return done;
+}
+
+const countFacts = (s) => String(s ?? "").split("\n").filter((l) => l.startsWith("- ")).length;
+const headingsOf = (s) => String(s ?? "").split("\n").filter((l) => l.startsWith("## ")).map((l) => l.slice(3).trim());
+
+// Topics about who the user is must never disappear in a tidy-up
+const KEEP_TOPICS = /เกี่ยวกับผู้ใช้|ชื่อเรียก|สิ่งที่ผู้ใช้ขอให้จำ/;
+
+/**
+ * Why a tidied memory file looks wrong, or "" when it looks fine.
+ * Merging duplicates shrinks a file; losing most of it means the model dropped facts.
+ */
+function tidyProblem(before, after) {
+    if (!after) return "ผลลัพธ์ว่าง";
+    if (!after.includes("## ") && before.includes("## ")) return "ไม่มีหัวข้อ";
+    const [ b, a ] = [ countFacts(before), countFacts(after) ];
+    if (b >= 8 && a < b * 0.5) return `เหลือ ${a} จาก ${b} เรื่อง (หายเกินครึ่ง)`;
+    if (after.length < before.length * 0.35) return "สั้นลงผิดปกติ";
+    const lost = headingsOf(before).filter((h) => KEEP_TOPICS.test(h) && !after.includes(h));
+    if (lost.length) return `หัวข้อสำคัญหายไป: ${lost.join(", ")}`;
+    return "";
 }
 
 /**
@@ -717,13 +806,14 @@ export async function compactMemory() {
 
     // Refuse obviously broken output rather than wipe the user's memory
     const cleaned = String(next ?? "").replace(/^```[a-z]*\n?|```\s*$/g, "").trim();
-    if (!cleaned || (!cleaned.includes("## ") && current.includes("## "))) return null;
+    const problem = tidyProblem(current, cleaned);
+    if (problem) {
+        console.log(`  🧹 ไม่ใช้ผลจัดระเบียบความจำ: ${problem}`);
+        return null;
+    }
     // She may have remembered something new while this ran; don't overwrite it
-    if ((await readMemoryFile()) !== current) return null;
-
-    await replaceMemory(cleaned);
-    const count = (s) => s.split("\n").filter((l) => l.startsWith("- ")).length;
-    return { before: count(current), after: count(cleaned) };
+    if (!(await replaceMemoryIf(current, cleaned))) return null;
+    return { before: countFacts(current), after: countFacts(cleaned) };
 }
 
 export { hasApiKey };

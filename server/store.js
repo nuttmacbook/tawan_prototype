@@ -1,6 +1,7 @@
-import { mkdir, readFile, writeFile, appendFile, readdir, rename, copyFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile, readdir, rename, copyFile } from "node:fs/promises";
 import path from "node:path";
 import { DATA_DIR, activeDir, fileOf, loadSettings, saveSettings } from "./profiles.js";
+import { withFileLock, writeAtomic, updateText } from "./fsutil.js";
 
 // Paths follow whichever character is active, so switching characters needs no restart
 const FILES = new Proxy({}, { get: (_, name) => fileOf(String(name)) });
@@ -49,14 +50,16 @@ const sectionTitle = (section) => section.split("\n")[0].replace(/^## /, "").tri
  * @returns {Promise<void>}
  */
 async function appendToSection(file, title, line, { fallbackHead = "" } = {}) {
-    const doc = splitSections((await safeRead(file)) || fallbackHead);
-    const index = doc.sections.findIndex((s) => sectionTitle(s) === title);
-    if (index >= 0) {
-        doc.sections[index] = `${doc.sections[index].trimEnd()}\n${line}`;
-    } else {
-        doc.sections.push(`## ${title}\n${line}`);
-    }
-    await writeFile(file, joinSections(doc));
+    await updateText(file, (text) => {
+        const doc = splitSections(text || fallbackHead);
+        const index = doc.sections.findIndex((s) => sectionTitle(s) === title);
+        if (index >= 0) {
+            doc.sections[index] = `${doc.sections[index].trimEnd()}\n${line}`;
+        } else {
+            doc.sections.push(`## ${title}\n${line}`);
+        }
+        return joinSections(doc);
+    });
 }
 
 /** Keeps the head plus the last N sections, which is how diary/journal stay small in the prompt */
@@ -74,8 +77,9 @@ const lastSections = (text, count) => {
  * @returns {Promise<string>} short confirmation
  */
 export async function remember(topic, fact) {
-    const cleanTopic = String(topic ?? "").trim() || "ทั่วไป";
-    const cleanFact = String(fact ?? "").trim();
+    // One line each: a newline would start a fake heading or bullet in memory.md
+    const cleanTopic = String(topic ?? "").replace(/[\r\n]+/g, " ").replace(/^#+\s*/, "").trim() || "ทั่วไป";
+    const cleanFact = String(fact ?? "").replace(/[\r\n]+/g, " ").trim();
     if (!cleanFact) return "ไม่มีข้อมูลให้จำ";
 
     await appendToSection(FILES.memory, cleanTopic, `- [${today()}] ${cleanFact}`);
@@ -89,13 +93,17 @@ export async function remember(topic, fact) {
  */
 export async function forget(keyword) {
     const word = String(keyword ?? "").trim();
-    if (!word) return 0;
+    // A one-letter keyword would wipe half the file
+    if (Array.from(word).length < 2) return 0;
 
-    const lines = (await safeRead(FILES.memory)).split("\n");
-    // Only bullet lines are facts; headings and notes stay so the file keeps its shape
-    const kept = lines.filter((l) => !(l.startsWith("- ") && l.includes(word)));
-    const removed = lines.length - kept.length;
-    if (removed > 0) await writeFile(FILES.memory, kept.join("\n"));
+    let removed = 0;
+    await updateText(FILES.memory, (text) => {
+        const lines = text.split("\n");
+        // Only bullet lines are facts; headings and notes stay so the file keeps its shape
+        const kept = lines.filter((l) => !(l.startsWith("- ") && l.includes(word)));
+        removed = lines.length - kept.length;
+        return removed > 0 ? kept.join("\n") : null;
+    });
     return removed;
 }
 
@@ -106,9 +114,26 @@ export async function forget(keyword) {
  */
 export async function replaceMemory(text) {
     const backup = path.join(activeDir(), "memory.backup.md");
-    await copyFile(FILES.memory, backup).catch(() => {});
-    await writeFile(FILES.memory, `${String(text ?? "").trim()}\n`);
+    await withFileLock(FILES.memory, async () => {
+        await copyFile(FILES.memory, backup).catch(() => {});
+        await writeAtomic(FILES.memory, `${String(text ?? "").trim()}\n`);
+    });
     return backup;
+}
+
+/**
+ * Writes the new memory only if the file still reads `expected`, as one locked step,
+ * so a fact remembered while a long tidy-up was running is never overwritten.
+ * @returns {Promise<boolean>} true when written
+ */
+export async function replaceMemoryIf(expected, text) {
+    const backup = path.join(activeDir(), "memory.backup.md");
+    return withFileLock(FILES.memory, async () => {
+        if ((await safeRead(FILES.memory)) !== expected) return false;
+        await copyFile(FILES.memory, backup).catch(() => {});
+        await writeAtomic(FILES.memory, `${String(text ?? "").trim()}\n`);
+        return true;
+    });
 }
 
 /* ------------------------------------ teachings */
@@ -128,6 +153,8 @@ const triggerOf = (section) => {
  * @returns {Promise<string>} short confirmation
  */
 export async function teach({ trigger, feeling = "", response = "", example = "" } = {}) {
+    const oneLine = (v) => String(v ?? "").replace(/[\r\n]+/g, " ").trim();
+    [ trigger, feeling, response, example ] = [ trigger, feeling, response, example ].map(oneLine);
     const cleanTrigger = String(trigger ?? "").trim();
     if (!cleanTrigger) return "ต้องบอกประโยคที่จะสอนด้วย";
 
@@ -141,17 +168,18 @@ export async function teach({ trigger, feeling = "", response = "", example = ""
         `- สอนเมื่อ: ${today()}`,
     ].filter(Boolean);
 
-    const doc = splitSections(await safeRead(FILES.teachings));
-    const index = doc.sections.findIndex((s) => triggerOf(s) === cleanTrigger);
-    const isUpdate = index >= 0;
-
-    if (isUpdate) {
-        doc.sections[index] = lines.join("\n");
-    } else {
-        doc.sections.push(lines.join("\n"));
-    }
-
-    await writeFile(FILES.teachings, joinSections(doc));
+    let isUpdate = false;
+    await updateText(FILES.teachings, (text) => {
+        const doc = splitSections(text);
+        const index = doc.sections.findIndex((s) => triggerOf(s) === cleanTrigger);
+        isUpdate = index >= 0;
+        if (isUpdate) {
+            doc.sections[index] = lines.join("\n");
+        } else {
+            doc.sections.push(lines.join("\n"));
+        }
+        return joinSections(doc);
+    });
     return `${isUpdate ? "อัปเดต" : "เรียนรู้"}แล้ว: "${cleanTrigger}"`;
 }
 
@@ -182,12 +210,15 @@ export async function listTeachings() {
  */
 export async function deleteTeaching(trigger) {
     const target = String(trigger ?? "").trim();
-    const doc = splitSections(await safeRead(FILES.teachings));
-    const before = doc.sections.length;
-    doc.sections = doc.sections.filter((s) => triggerOf(s) !== target);
-    if (doc.sections.length === before) return false;
-    await writeFile(FILES.teachings, joinSections(doc));
-    return true;
+    let removed = false;
+    await updateText(FILES.teachings, (text) => {
+        const doc = splitSections(text);
+        const before = doc.sections.length;
+        doc.sections = doc.sections.filter((s) => triggerOf(s) !== target);
+        removed = doc.sections.length !== before;
+        return removed ? joinSections(doc) : null;
+    });
+    return removed;
 }
 
 /* ------------------------------------ chat style */
@@ -218,22 +249,25 @@ export async function addStyleCorrection({ before, after, context = "" } = {}) {
         ...good.map((g) => `  ✅ ${g}`),
     ].join("\n");
 
-    const doc = splitSections((await safeRead(FILES.style)) || STYLE_HEAD);
-    let index = doc.sections.findIndex((x) => sectionTitle(x) === "แก้จากแชท");
-    if (index < 0) {
-        doc.sections.push("## แก้จากแชท");
-        index = doc.sections.length - 1;
-    }
+    let count = 0;
+    await updateText(FILES.style, (text) => {
+        const doc = splitSections(text || STYLE_HEAD);
+        let index = doc.sections.findIndex((x) => sectionTitle(x) === "แก้จากแชท");
+        if (index < 0) {
+            doc.sections.push("## แก้จากแชท");
+            index = doc.sections.length - 1;
+        }
 
-    // Keep the heading and its note, then the newest pairs only so the prompt doesn't balloon
-    const [ heading, ...rest ] = doc.sections[index].split("\n");
-    const notes = rest.filter((l) => l.startsWith(">"));
-    const pairs = rest.filter((l) => !l.startsWith(">")).join("\n").split(/\n(?=- )/).map((x) => x.trim()).filter(Boolean);
-    pairs.push(entry);
-    doc.sections[index] = [ heading, ...notes, ...pairs.slice(-MAX_CORRECTIONS) ].join("\n");
-
-    await writeFile(FILES.style, joinSections(doc));
-    return pairs.length > MAX_CORRECTIONS ? MAX_CORRECTIONS : pairs.length;
+        // Keep the heading and its note, then the newest pairs only so the prompt doesn't balloon
+        const [ heading, ...rest ] = doc.sections[index].split("\n");
+        const notes = rest.filter((l) => l.startsWith(">"));
+        const pairs = rest.filter((l) => !l.startsWith(">")).join("\n").split(/\n(?=- )/).map((x) => x.trim()).filter(Boolean);
+        pairs.push(entry);
+        doc.sections[index] = [ heading, ...notes, ...pairs.slice(-MAX_CORRECTIONS) ].join("\n");
+        count = Math.min(pairs.length, MAX_CORRECTIONS);
+        return joinSections(doc);
+    });
+    return count;
 }
 
 /**
@@ -264,20 +298,23 @@ export async function addStyleSamples(raw, { speaker = "" } = {}) {
 
     if (!lines.length) return 0;
 
-    const doc = splitSections((await safeRead(FILES.style)) || STYLE_HEAD);
-    let index = doc.sections.findIndex((x) => sectionTitle(x) === "ตัวอย่างจากแชทจริง");
-    if (index < 0) {
-        doc.sections.push("## ตัวอย่างจากแชทจริง");
-        index = doc.sections.length - 1;
-    }
-    const [ heading, ...rest ] = doc.sections[index].split("\n");
-    const notes = rest.filter((l) => l.startsWith(">"));
-    const existing = rest.filter((l) => l.startsWith("- ")).map((l) => l.slice(2));
-    const merged = [ ...new Set([ ...existing, ...lines ]) ].slice(-MAX_SAMPLES);
-    doc.sections[index] = [ heading, ...notes, ...merged.map((l) => `- ${l}`) ].join("\n");
-
-    await writeFile(FILES.style, joinSections(doc));
-    return new Set(lines.filter((l) => !existing.includes(l))).size;
+    let added = 0;
+    await updateText(FILES.style, (text) => {
+        const doc = splitSections(text || STYLE_HEAD);
+        let index = doc.sections.findIndex((x) => sectionTitle(x) === "ตัวอย่างจากแชทจริง");
+        if (index < 0) {
+            doc.sections.push("## ตัวอย่างจากแชทจริง");
+            index = doc.sections.length - 1;
+        }
+        const [ heading, ...rest ] = doc.sections[index].split("\n");
+        const notes = rest.filter((l) => l.startsWith(">"));
+        const existing = rest.filter((l) => l.startsWith("- ")).map((l) => l.slice(2));
+        const merged = [ ...new Set([ ...existing, ...lines ]) ].slice(-MAX_SAMPLES);
+        doc.sections[index] = [ heading, ...notes, ...merged.map((l) => `- ${l}`) ].join("\n");
+        added = new Set(lines.filter((l) => !existing.includes(l))).size;
+        return joinSections(doc);
+    });
+    return added;
 }
 
 /* ------------------------------------ editable files */
@@ -292,7 +329,7 @@ export async function readEditable(name) {
 
 export async function writeEditable(name, text) {
     if (!EDITABLE.includes(name)) throw new Error("ไม่รู้จักไฟล์นี้");
-    await writeFile(FILES[name], `${String(text ?? "").trimEnd()}\n`);
+    await withFileLock(FILES[name], () => writeAtomic(FILES[name], `${String(text ?? "").trimEnd()}\n`));
 }
 
 export { loadSettings, saveSettings };
@@ -318,12 +355,22 @@ export async function todayEntries(limit = 120) {
 export async function logTurn(who, name, text, at = Date.now()) {
     await mkdir(historyDir(), { recursive: true });
     const file = path.join(historyDir(), `${today()}.md`);
-    const header = (await safeRead(file)) ? "" : `# บทสนทนา ${today()}\n\n`;
     const label = who === "user" ? `**${name}**` : `*${name}*`;
     // User messages keep the time they were sent, not the time she got around to reading them
     const time = new Date(at).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
-    await appendFile(file, `${header}[${time}] ${label}: ${String(text ?? "").replace(/\n+/g, " / ")}\n\n`);
+    const line = `[${time}] ${label}: ${String(text ?? "").replace(/\n+/g, " / ")}\n\n`;
+    await updateText(file, (current) => `${current || `# บทสนทนา ${today()}\n\n`}${line}`);
 }
+
+/**
+ * Her bubbles as one log line. " / " separates bubbles in the log, so a " / " inside a bubble
+ * becomes a full-width slash; otherwise a refresh would split one bubble into two.
+ * @param {string[]} bubbles
+ */
+export const bubblesForLog = (bubbles) =>
+    (Array.isArray(bubbles) ? bubbles : [ bubbles ])
+        .map((b) => String(b ?? "").replace(/\s*\n+\s*/g, " ").replace(/ \/ /g, " ／ "))
+        .join("\n");
 
 /* ------------------------------------ older days */
 
@@ -359,16 +406,24 @@ export async function previousDay(before) {
  * @returns {Promise<boolean>} true when a line was changed
  */
 export async function unsendFromHistory(text, time) {
-    const file = path.join(historyDir(), `${today()}.md`);
-    const lines = (await safeRead(file)).split("\n");
     const body = String(text ?? "").replace(/\n+/g, " / ");
-    for (let i = lines.length - 1; i >= 0; i--) {
-        const m = lines[i].match(/^\[(\d{2}:\d{2})\] \*\*(.+?)\*\*: (.*)$/);
-        if (m && m[3] === body && (!time || m[1] === time)) {
-            lines[i] = `[${m[1]}] **${m[2]}**: ${UNSENT}`;
-            await writeFile(file, lines.join("\n"));
-            return true;
-        }
+    // A message sent just before midnight may have been answered (and logged) just after it
+    const yesterday = new Date(Date.now() - 86400000).toLocaleDateString("sv-SE");
+    for (const day of [ today(), yesterday ]) {
+        let changed = false;
+        await updateText(path.join(historyDir(), `${day}.md`), (current) => {
+            const lines = current.split("\n");
+            for (let i = lines.length - 1; i >= 0; i--) {
+                const m = lines[i].match(/^\[(\d{2}:\d{2})\] \*\*(.+?)\*\*: (.*)$/);
+                if (m && m[3] === body && (!time || m[1] === time)) {
+                    lines[i] = `[${m[1]}] **${m[2]}**: ${UNSENT}`;
+                    changed = true;
+                    return lines.join("\n");
+                }
+            }
+            return null;
+        });
+        if (changed) return true;
     }
     return false;
 }
@@ -391,29 +446,44 @@ export async function loadPending() {
     }
 }
 
-const savePending = (list) => writeFile(pendingFile(), `${JSON.stringify(list, null, 1)}\n`);
+/**
+ * Every change to the waiting list goes through here, one at a time, so a message sent
+ * while she is answering can't be lost when her answer removes the older ones.
+ * @param {(list: object[]) => any} change edits the list in place; return false to skip saving
+ */
+function changePending(change) {
+    const file = pendingFile();
+    return withFileLock(file, async () => {
+        const list = await loadPending();
+        const result = await change(list);
+        if (result !== false) await writeAtomic(file, `${JSON.stringify(list, null, 1)}\n`);
+        return result;
+    });
+}
 
 export async function addPending({ id, text }) {
     const cleanId = String(id ?? "").replace(/[^\w-]/g, "").slice(0, 40);
     const cleanText = String(text ?? "").trim().slice(0, 4000);
     if (!cleanId || !cleanText) throw new Error("ข้อความว่าง");
-    const list = await loadPending();
-    // Retrying a send must not duplicate the message
-    if (!list.some((m) => m.id === cleanId)) list.push({ id: cleanId, text: cleanText, sentAt: Date.now(), readAt: 0 });
-    await savePending(list);
+    await changePending((list) => {
+        // Retrying a send must not duplicate the message
+        if (list.some((m) => m.id === cleanId)) return false;
+        list.push({ id: cleanId, text: cleanText, sentAt: Date.now(), readAt: 0 });
+    });
 }
 
 export async function markPendingRead(ids) {
     const wanted = new Set((ids ?? []).map(String));
-    const list = await loadPending();
-    let changed = false;
-    for (const m of list) {
-        if (wanted.has(m.id) && !m.readAt) {
-            m.readAt = Date.now();
-            changed = true;
+    await changePending((list) => {
+        let changed = false;
+        for (const m of list) {
+            if (wanted.has(m.id) && !m.readAt) {
+                m.readAt = Date.now();
+                changed = true;
+            }
         }
-    }
-    if (changed) await savePending(list);
+        return changed;
+    });
 }
 
 /** Pending messages for these ids, in the order they were sent */
@@ -426,30 +496,35 @@ export async function takePending(ids) {
  * Takes back a message she hasn't answered yet.
  * @returns {Promise<{ found: boolean, wasRead: boolean, text: string }>}
  */
-export async function unsendPending(id) {
-    const list = await loadPending();
-    const item = list.find((m) => m.id === String(id ?? ""));
-    if (!item) return { found: false, wasRead: false, text: "" };
-    await savePending(list.filter((m) => m !== item));
-    return { found: true, wasRead: Boolean(item.readAt), text: item.text };
+export function unsendPending(id) {
+    return changePending((list) => {
+        const index = list.findIndex((m) => m.id === String(id ?? ""));
+        if (index < 0) return false;
+        const [ item ] = list.splice(index, 1);
+        return { found: true, wasRead: Boolean(item.readAt), text: item.text };
+    }).then((r) => r || { found: false, wasRead: false, text: "" });
 }
 
 /** Editing is only allowed before she reads it, like fixing a typo before the other side sees it */
 export async function editPending(id, text) {
     const clean = String(text ?? "").trim().slice(0, 4000);
     if (!clean) throw new Error("ข้อความว่าง");
-    const list = await loadPending();
-    const item = list.find((m) => m.id === String(id ?? ""));
-    if (!item) throw new Error("ข้อความนี้ถูกตอบไปแล้ว แก้ไม่ได้");
-    if (item.readAt) throw new Error("เธออ่านแล้ว แก้ไม่ได้ ยกเลิกส่งได้อย่างเดียว");
-    item.text = clean;
-    item.isEdited = true;
-    await savePending(list);
+    await changePending((list) => {
+        const item = list.find((m) => m.id === String(id ?? ""));
+        if (!item) throw new Error("ข้อความนี้ถูกตอบไปแล้ว แก้ไม่ได้");
+        if (item.readAt) throw new Error("เธออ่านแล้ว แก้ไม่ได้ ยกเลิกส่งได้อย่างเดียว");
+        item.text = clean;
+        item.isEdited = true;
+    });
 }
 
 export async function removePending(ids) {
     const gone = new Set((ids ?? []).map(String));
-    await savePending((await loadPending()).filter((m) => !gone.has(m.id)));
+    await changePending((list) => {
+        const kept = list.filter((m) => !gone.has(m.id));
+        if (kept.length === list.length) return false;
+        list.splice(0, list.length, ...kept);
+    });
 }
 
 /** Tail of the latest history file, so the agent picks up where the last run stopped */
@@ -552,10 +627,12 @@ export async function readUpload(name) {
 const JOURNAL_HEAD = "# บันทึกความทรงจำ\n\n> สรุปของแต่ละวันจากมุมมองของตัวละคร ระบบเขียนเองเมื่อขึ้นวันใหม่ แก้ได้\n";
 
 export async function appendJournal(date, summary) {
-    const doc = splitSections((await safeRead(FILES.journal)) || JOURNAL_HEAD);
-    doc.sections = doc.sections.filter((s) => sectionTitle(s) !== date);
-    doc.sections.push(`## ${date}\n${String(summary ?? "").trim()}`);
-    await writeFile(FILES.journal, joinSections(doc));
+    await updateText(FILES.journal, (text) => {
+        const doc = splitSections(text || JOURNAL_HEAD);
+        doc.sections = doc.sections.filter((s) => sectionTitle(s) !== date);
+        doc.sections.push(`## ${date}\n${String(summary ?? "").trim()}`);
+        return joinSections(doc);
+    });
 }
 
 /* ------------------------------------ read all */

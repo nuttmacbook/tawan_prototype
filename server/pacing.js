@@ -48,9 +48,12 @@ export function parseActivities(persona) {
         .filter((l) => l.startsWith("- ") && l.includes("|"))
         .map((l) => {
             const [ name, hours, chance, minutes, phone = "" ] = l.slice(2).split("|").map((x) => x.trim());
+            // "22-2" crosses midnight: it becomes 22-24 plus 0-2
             const ranges = String(hours ?? "").split(",")
-                .map((r) => r.split("-").map(Number))
-                .filter(([ a, b ]) => Number.isFinite(a) && Number.isFinite(b) && b > a);
+                .map((r) => r.split("-").map((x) => Number(x.trim())))
+                .filter(([ a, b ]) => Number.isFinite(a) && Number.isFinite(b) && a >= 0 && b <= 24 && a !== b)
+                .flatMap(([ a, b ]) => (b > a ? [ [ a, b ] ] : [ [ a, 24 ], [ 0, b ] ]))
+                .filter(([ a, b ]) => b > a);
             const [ lo, hi = lo ] = String(minutes ?? "").split("-").map(Number);
             const pct = Number(String(chance ?? "").replace("%", ""));
             if (!name || !ranges.length || !Number.isFinite(lo) || !Number.isFinite(pct)) return null;
@@ -112,9 +115,14 @@ const personaHabits = (persona) => {
     };
 };
 
-/** True between bedtime and wake-up, handling bedtimes after midnight and before it */
-const isAsleepAt = (hour, { sleepHour, wakeHour }) =>
-    sleepHour < wakeHour ? hour >= sleepHour && hour < wakeHour : hour >= sleepHour || hour < wakeHour;
+/**
+ * True between bedtime and wake-up, handling bedtimes after midnight and before it.
+ * The same hour for both means no sleep at all, not "asleep all day".
+ */
+export const isAsleepAt = (hour, { sleepHour, wakeHour }) => {
+    if (sleepHour === wakeHour) return false;
+    return sleepHour < wakeHour ? hour >= sleepHour && hour < wakeHour : hour >= sleepHour || hour < wakeHour;
+};
 
 /* ------------------------------------ plan */
 

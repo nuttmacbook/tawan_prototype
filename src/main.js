@@ -1,11 +1,11 @@
 import "./main.css";
 import { api } from "./api.js";
-import { header, brainPicker, subline, fullRoleButton, remoteLinks } from "./componants/header.js";
-import { chatPanel, bubble, note, typing, errorLine, statusAside, pacingNote, stateNote, correctionForm, previewOf, divider, unsentLine } from "./componants/chat.js";
-import { teachPanel, lessonList, snapshotList, FILES } from "./componants/teach.js";
-import { overlays, searchResults } from "./componants/overlays.js";
-import { logicPanel, logicEvent, backupList, logicWorking } from "./componants/logic.js";
-import { esc } from "./componants/ui.js";
+import { header, brainPicker, subline, fullRoleButton, remoteLinks } from "./components/header.js";
+import { chatPanel, bubble, note, typing, errorLine, statusAside, pacingNote, stateNote, correctionForm, previewOf, divider, unsentLine } from "./components/chat.js";
+import { teachPanel, lessonList, snapshotList, FILES } from "./components/teach.js";
+import { overlays, searchResults } from "./components/overlays.js";
+import { logicPanel, logicEvent, backupList, logicWorking } from "./components/logic.js";
+import { esc } from "./components/ui.js";
 
 /* ------------------------------------ state */
 
@@ -1098,9 +1098,13 @@ if (typeof document !== "undefined") {
         if (state.clientId) api.beat(state.clientId, !document.hidden).catch(() => {});
     });
     window.addEventListener("pagehide", () => {
-        try {
-            navigator.sendBeacon?.("/api/presence/beat", JSON.stringify({ clientId: state.clientId, visible: false }));
-        } catch {}
+        // keepalive fetch instead of sendBeacon: the server only accepts JSON posts, and a beacon is sent as plain text
+        fetch("/api/presence/beat", {
+            method: "POST",
+            keepalive: true,
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ clientId: state.clientId, visible: false }),
+        }).catch(() => {});
     });
 }
 

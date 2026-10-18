@@ -10,6 +10,10 @@
   UI เป็น template string ขึ้นต้นด้วย `/*html*/`, handler ประกาศบน `window`, เลือก DOM ด้วย `data-*`,
   Tailwind v4 ธีมมืด slate/sky, คอมเมนต์ภาษาอังกฤษสั้น ๆ อธิบาย "ทำไม", ข้อความใน UI เป็นภาษาไทย
 - ป้องกันค่า undefined ด้วย optional chaining เสมอ ห้าม throw ตอน render
+- เขียนไฟล์ข้อมูลผ่าน `server/fsutil.js` เท่านั้น (`updateText()` หรือ `withFileLock()` + `writeAtomic()`) ห้ามอ่านแล้ว `writeFile` ตรง ๆ เพราะหลายงานแก้ไฟล์เดียวกันพร้อมกันได้ (ข้อความหาย, ไฟล์ครึ่ง ๆ ตอนไฟดับ)
+- งานที่ใช้เวลานานทำงานแบบ "ปักตัวละคร" (`pinProfile()` ใน `server/profiles.js`) path ไฟล์มาจาก `currentId()` ไม่ใช่ตัวที่เปิดอยู่ตอนนั้น · สลับตัวละครต้องผ่าน `switchExclusive()` ใน `server/brain.js`
+- ค่าที่มาจากข้อมูล (ชื่อตัวละคร, id) ห้ามใส่ใน `onclick="fn('...')"` ให้ใส่ `data-*` แล้วอ่าน `this.dataset` แทน (`esc()` กันใน attribute ไม่ได้ เบราว์เซอร์ถอด `&#39;` กลับก่อนรัน JS)
+- ห้ามลบการตรวจ `isKnownHost()` / `isOwnPage()` ใน `server/gate.js` มันกันเว็บอื่นสั่งแก้โค้ดผ่านเบราว์เซอร์ของผู้ใช้
 - แก้ให้น้อยที่สุดเท่าที่ทำให้คำขอสำเร็จ แล้วสรุปเป็นภาษาไทยสั้น ๆ ว่าแก้ไฟล์ไหน อย่างไร
 - ระบบสำรองไฟล์ให้อัตโนมัติก่อนทุกคำสั่ง และย้อนกลับได้จากหน้าเว็บ
 
@@ -20,7 +24,7 @@
 | ตอบช้า/เร็ว, อ่านแล้ว, ความเร็วพิมพ์ | `server/pacing.js` | `PACING` และ `planReply()` |
 | กิจกรรมที่ทำให้ยังไม่อ่าน / อ่านแล้วตอบทีหลัง | `data/personas/<id>/persona.md` หัวข้อ "กิจกรรมระหว่างวัน" (ผู้ใช้แก้เอง) · ตัวอ่านอยู่ที่ `server/pacing.js` | `parseActivities()`, ค่าสำรอง `ACTIVITIES` |
 | เลือกความจำ/สิ่งที่สอนที่ส่งให้สมอง, งบตัวอักษร | `server/recall.js` | `selectMemory()`, `selectTeachings()`, `CORE_TOPICS` |
-| ตัววัดขนาด prompt, token ที่ใช้ | `server/brain.js` (`contextFor()`, `promptStats()`) + `src/componants/chat.js` (`promptMeter()`) | |
+| ตัววัดขนาด prompt, token ที่ใช้ | `server/brain.js` (`contextFor()`, `promptStats()`) + `src/components/chat.js` (`promptMeter()`) | |
 | จัดระเบียบความจำอัตโนมัติ, ยกเลิกส่ง/แก้ไขข้อความ | `server/index.js` | `maybeTidyMemory()`, routes `/api/unsend`, `/api/edit` |
 | ส่งออก/นำเข้าตัวละคร, สำรองไปโฟลเดอร์นอก | `server/portable.js` | `exportProfile()`, `importProfile()` (ห้ามเขียนชื่อไฟล์ที่ไม่ผ่านการตรวจ), `backupAll()` |
 | แจ้งเตือน Web Push | `server/push.js` + `public/sw.js` + `src/main.js` (`renderNotify()`) | ส่งเมื่อ `away.isBeingViewed()` เป็น false |
@@ -29,9 +33,13 @@
 | ตัวละครทักมาตอนปิดแชท, ตอบข้อความที่ค้างตอนปิดแชท, แท็บ/เครื่องที่ใช้งานอยู่ | `server/away.js` | ค่าคงที่ด้านบน, `answerWhileClosed()`, `startAwayScheduler()` |
 | ข้อความที่ส่งแล้วแต่เธอยังไม่ตอบ (กันหายตอนรีเฟรช) | `server/store.js` + `server/index.js` | `addPending()`, `replyToPending()`, route `/api/send` |
 | รูป, สติกเกอร์, ตอบกลับ, รีแอคชัน (ฝั่งสมอง) | `server/brain.js` | `<chat_features>` ใน `stablePrompt`, `turn()`, `addReaction()` |
-| รูป, สติกเกอร์, ตอบกลับ, รีแอคชัน (ฝั่งหน้าเว็บ) | `src/componants/chat.js` | `bubble()`, `parseMessage()`, `STICKERS`, `REACTIONS` |
-| ค้นหา, ดูรูปเต็ม, "เปิดอยู่ที่อื่น" | `src/componants/overlays.js` | |
-| เข้าจากเครื่องอื่น (LAN, Cloudflare Tunnel), รหัสเข้า, กันเดารหัส | `server/index.js` | `accessGate()`, `isLocal()`, `LOCAL_ONLY` — ห้ามทำให้คำขอผ่าน tunnel ถูกนับเป็น local |
+| รูป, สติกเกอร์, ตอบกลับ, รีแอคชัน (ฝั่งหน้าเว็บ) | `src/components/chat.js` | `bubble()`, `parseMessage()`, `STICKERS`, `REACTIONS` |
+| ค้นหา, ดูรูปเต็ม, "เปิดอยู่ที่อื่น" | `src/components/overlays.js` | |
+| เข้าจากเครื่องอื่น (LAN, Cloudflare Tunnel), รหัสเข้า, กันเดารหัส | `server/index.js` + `server/gate.js` | `accessGate()`, `isLocal()`, `LOCAL_ONLY` — ห้ามทำให้คำขอผ่าน tunnel ถูกนับเป็น local |
+| กันเว็บอื่นยิงคำขอมาที่แอป (CSRF, DNS rebinding) | `server/gate.js` | `makeHostCheck()` (ชื่อ host ที่ยอมรับ, `ALLOWED_HOSTS`), `isOwnPage()` (POST ต้องเป็น JSON จากหน้าเดียวกัน) |
+| ล็อกไฟล์, เขียนไฟล์แบบไม่พังกลางทาง | `server/fsutil.js` | `withFileLock()`, `writeAtomic()`, `updateText()` |
+| ตอบข้อความเดียวกันซ้ำ / ตอบไม่สำเร็จแล้วลองใหม่ | `server/index.js` | `replyToPending()` (`inFlight` เก็บคำตอบที่กำลังเขียน) |
+| รีสตาร์ทเองเมื่อล้ม, ย้อนโค้ดเมื่อ /api/health ไม่ตอบ | `scripts/run.js` | `start()`, `watchHealth()`, `MAX_CRASHES` |
 | โลโก้แอป, manifest หน้าจอโฮม | `server/appicon.js` | `currentIcon()` (หา `logo.*` ใน `data/` แล้วโฟลเดอร์หลัก), `PUBLIC_PATHS` (เปิดได้โดยไม่ต้องมีรหัส ห้ามใส่อะไรที่เป็นข้อมูลส่วนตัว) |
 | ค่าเริ่มต้นโหมด full role | `src/main.js` | `isFullRole: readPref("fullRole", true)` |
 | เปิด/ปิด cloudflared | `scripts/run.js` | `startTunnel()` |
@@ -50,11 +58,12 @@
 | เรียก Claude ในเครื่อง / API | `server/llm.js` | |
 | API ของหน้าเว็บ | `server/index.js` | `routes` |
 | จังหวะฝั่งหน้าเว็บ: รวมข้อความที่พิมพ์ต่อกัน, รอผู้ใช้พิมพ์เสร็จ, อ่านแล้ว/ส่งแล้ว, ทักเมื่อเงียบ | `src/main.js` | ส่วน `engine`: `schedule()`, `reply()`, `armIdle()` |
-| หน้าตาแชท / สถานะ | `src/componants/chat.js` | |
-| หน้าตาแถบสอน | `src/componants/teach.js` | |
-| หน้าตาโหมด editlogic | `src/componants/logic.js` | |
-| หัวหน้าเว็บ, แถบ, โหมด full role | `src/componants/header.js` | |
+| หน้าตาแชท / สถานะ | `src/components/chat.js` | |
+| หน้าตาแถบสอน | `src/components/teach.js` | |
+| หน้าตาโหมด editlogic | `src/components/logic.js` | |
+| หัวหน้าเว็บ, แถบ, โหมด full role | `src/components/header.js` | |
 
 ## หลังแก้
-- แก้ไฟล์ใน `server/` หรือ `scripts/` ต้องรีสตาร์ทเซิร์ฟเวอร์ (หน้าเว็บมีปุ่มให้) ถ้าเปิดไม่ขึ้นระบบจะย้อนกลับเอง
+- แก้ไฟล์ใน `server/` หรือ `scripts/` ต้องรีสตาร์ทเซิร์ฟเวอร์ (หน้าเว็บมีปุ่มให้) ถ้าเปิดไม่ขึ้น หรือเปิดได้แต่ `/api/health` ไม่ตอบใน 30 วินาที ระบบจะย้อนกลับเอง
+- ส่วนที่ไม่ต้องใช้สมองมี test ใน `test/` (ผู้ใช้รัน `npm test` เอง) ถ้าแก้ไฟล์ที่มี test ให้แก้ test ให้ตรงด้วย
 - แก้ไฟล์ใน `src/` แค่โหลดหน้าเว็บใหม่
