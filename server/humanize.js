@@ -99,7 +99,7 @@ export function humanizeReply(bubbles, style, { allowTypo = true } = {}) {
     let out = (Array.isArray(bubbles) ? bubbles : []).map((b) => {
         let t = String(b ?? "").trim();
         // Not the silk kind: ผ้าไหม, เส้นไหม, หนอนไหม are words, not the question particle.
-        // Never inside [ส่งรูป:...] / [ตอบกลับ "..."] or a link: a photo name or address must stay exact
+        // Never inside [ตอบกลับ "..."] or a link: a quote or an address must stay exact
         if (s.maiToMai) {
             t = t.split(/(\[[^\]]*\]|https?:\/\/\S+)/)
                 .map((part, i) => (i % 2 ? part : part.replace(/(?<!ผ้า|เส้น|หนอน|ใย)ไหม(?=$|[\s?!.,)])/g, "มั้ย")))

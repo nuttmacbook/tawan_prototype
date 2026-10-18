@@ -9,7 +9,7 @@ import { loadState, passTime, markUserMessage, gapSinceUser, adjustMood, describ
 import { currentId, getActiveId } from "./profiles.js";
 import { loadThreads, addThread, closeThread, writeDiary, loadDiary, notePerson, peopleFor } from "./life.js";
 import { askApi, askClaudeCode, hasApiKey, usageOf, claudeCodeUsage, WEB_FETCH_TOOL } from "./llm.js";
-import { todayInfo, knownLinks, unsentPhotos, markPhotoSent, unmarkPhotoSent, photosIn, checkShared, linksIn } from "./world.js";
+import { todayInfo, knownLinks, checkShared, linksIn } from "./world.js";
 import { humanizeReply, userStyleNote, repetitionNote } from "./humanize.js";
 import { selectMemory, selectTeachings } from "./recall.js";
 import { getConfig } from "./config.js";
@@ -139,7 +139,6 @@ export const cutLastReply = (shown, expected) =>
         const logged = shownInLog(reply.bubbles.slice(0, n), reply.unsend);
         await replaceLoggedLine(reply.logged, n ? `${reply.logged.line.match(/^\[\d{2}:\d{2}\] /)?.[0] ?? ""}*${name}*: ${bubblesForLog(logged).replace(/\n+/g, " / ")}` : null);
         me.draft = dropped.length ? { text: dropped, at: Date.now(), profileId: reply.profileId } : null;
-        for (const name of photosIn(dropped)) await unmarkPhotoSent(name).catch(() => {});
         me.lastReply = null;
         return true;
     });
@@ -357,8 +356,7 @@ ${String(style ?? "").trim() || "(ยังไม่มี)"}
 - กดรีแอคที่ข้อความล่าสุดของผู้ใช้ (react) เหมาะกับข้อความที่แค่ต้องรับรู้ เช่น กดใจแล้วไม่ต้องตอบ
 - ตอบกลับข้อความเฉพาะ: ขึ้นต้น bubble ด้วย [ตอบกลับ "ข้อความเดิมสั้น ๆ"] ใช้เมื่อตอบข้อความที่ไม่ใช่อันล่าสุด
   หรือผู้ใช้ส่งมาหลายเรื่องติดกัน ให้รู้ว่าตอบเรื่องไหน (ไม่ต้องใช้กับข้อความล่าสุด)
-- ส่งรูปของคุณเอง: bubble "[ส่งรูป:ชื่อไฟล์]" ใช้ได้เฉพาะชื่อใน <photos> ตรงตัว (ชื่อไฟล์บอกว่าเป็นรูปอะไร) พิมพ์คำบรรยายใน bubble เดียวกันได้ ส่งเมื่อเข้ากับเรื่องที่คุยเท่านั้น
-  ถ้าไม่มีรูปที่เข้ากัน ให้เล่าเป็นข้อความ ห้ามอ้างว่าส่งรูปไปแล้ว · [รูปเธอ:...] ในประวัติแชท = รูปที่คุณเคยส่งไปแล้ว
+- คุณส่งรูปไม่ได้ ถ้าจะเล่าว่าถ่ายรูปอะไร ให้เล่าเป็นข้อความ ห้ามอ้างว่าส่งรูปไปแล้ว
 - ลิงก์ที่ผู้ใช้ส่งมา: ถ้า <reply_context> บอกว่าเปิดอ่านได้ ให้คุยเรื่องเนื้อหานั้นแบบเพื่อนที่เปิดดูแล้ว ถ้าเปิดไม่ได้หรือเป็นวิดีโอ ให้บอกตรง ๆ ว่ายังไม่ได้ดู/เปิดไม่ขึ้น ห้ามแกล้งรู้
 </chat_features>
 
@@ -425,10 +423,6 @@ ${world?.today || "(วันนี้ยังไม่ได้ดูเน็
 ${world?.people || "(ยังไม่ได้จด ถ้าเล่าถึงใครให้ note_person)"}
 </people>
 
-<photos>
-${world?.photos?.length ? `รูปของคุณที่ส่งได้ (ยังไม่เคยส่ง): ${world.photos.join(", ")}` : "(ไม่มีรูปให้ส่ง)"}
-</photos>
-
 <diary>
 ${diary.recent || "(ยังว่าง)"}
 ${diary.hasToday ? "" : "\nวันนี้ยังไม่มีไดอารี่: คิดเรื่องเล็ก ๆ ที่เกิดกับตัวเองวันนี้ 1 เรื่อง ให้เข้ากับบุคลิกและเวลา แล้ว write_diary (ไม่ต้องเล่าถ้ายังไม่มีจังหวะ)"}
@@ -492,18 +486,16 @@ const toBubbles = (text) => {
 const recentQuery = () => recentTurns().slice(-8).map((t) => t.text).join("\n");
 
 const TODAY_BUDGET = 3000;
-const MAX_PHOTO_NAMES = 30;
 
-/** Her day from the morning look-up, the people in her life, and photos she could send */
+/** Her day from the morning look-up and the people in her life */
 async function worldFor(query) {
-    const [ info, people, photos ] = await Promise.all([
+    const [ info, people ] = await Promise.all([
         todayInfo().catch(() => null),
         peopleFor(query).catch(() => ""),
-        unsentPhotos().catch(() => []),
     ]);
     // today.md is only today's when the look-up ran today; yesterday's weather would be wrong
     const today = info ? (await safeRead(FILES.today)).replace(/^>.*$/gm, "").trim().slice(0, TODAY_BUDGET) : "";
-    return { today, people, photos: photos.slice(0, MAX_PHOTO_NAMES) };
+    return { today, people };
 }
 
 async function contextFor(replyNote = "") {
@@ -731,8 +723,6 @@ async function turn(userText, replyNote = "") {
         const { bubbles, unsend, hesitate } = humanizeReply(raw, (await loadTexts()).style, { allowTypo: !isSerious });
         // What she "said" is what stayed on screen: a bubble she took back isn't part of it
         const said = bubbles.filter((_, i) => !unsend.includes(i));
-        // Counted as sent only if it stays on screen (cutLastReply puts back one she never got to)
-        for (const name of photosIn(said)) await markPhotoSent(name).catch(() => {});
         me.transcript.push({ role: "assistant", text: said.join("\n\n") || (turnReaction ? `(กดรีแอค ${turnReaction})` : "(อ่านแล้วไม่ตอบ)") });
         return { bubbles, unsend, hesitate, notes, reaction: turnReaction };
     } catch (err) {
@@ -742,12 +732,12 @@ async function turn(userText, replyNote = "") {
 }
 
 /**
- * Links only from today's look-up or from you, photos only from her folder. A link she invented
+ * Links only from today's look-up or from you, and no pretend photos. A link she invented
  * would look real and lead nowhere (or somewhere bad), so it's taken out before you see it.
  */
 async function checkReply(bubbles, userLinks = [], notes = []) {
     const links = new Set([ ...(await knownLinks().catch(() => [])), ...userLinks, ...me.transcript.flatMap((t) => (t.role === "user" ? linksIn(t.text) : [])) ]);
-    const result = checkShared(bubbles, { links, photos: await unsentPhotos().catch(() => []) });
+    const result = checkShared(bubbles, { links });
     if (result.dropped.length) notes.push(`ตัดออก (ไม่มีจริง): ${result.dropped.join(", ")}`);
     return result.bubbles;
 }

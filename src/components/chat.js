@@ -22,9 +22,6 @@ const STICKERS = [
 ];
 
 const IMAGE_TOKEN = /\[รูป:([a-z0-9]+\.(?:jpg|png|webp|gif))\]/g;
-// A picture from her own photos folder (data/personas/<id>/photos/), sent by her
-const HER_PHOTO = /\[รูปเธอ:([^\]\/\\]{1,120})\]/g;
-// http(s) only; trailing punctuation stays outside the link
 /**
  * Text with web links made clickable. Every piece is escaped on its own, so a link can't
  * smuggle markup in, and links open in a new tab without access back to this page.
@@ -49,11 +46,8 @@ const EMOJI_ONLY = /^(?:\p{Extended_Pictographic}|\p{Emoji_Modifier}|\u200d|\ufe
  */
 const parseMessage = (raw) => {
     let text = String(raw ?? "");
-    const images = [
-        ...[ ...text.matchAll(IMAGE_TOKEN) ].map((m) => `/api/upload/${m[1]}`),
-        ...[ ...text.matchAll(HER_PHOTO) ].map((m) => `/api/photo/${encodeURIComponent(m[1])}`),
-    ];
-    text = text.replace(IMAGE_TOKEN, "").replace(HER_PHOTO, "").trim();
+    const images = [ ...text.matchAll(IMAGE_TOKEN) ].map((m) => `/api/upload/${m[1]}`);
+    text = text.replace(IMAGE_TOKEN, "").trim();
     const reply = text.match(REPLY_TOKEN)?.[1] ?? "";
     text = text.replace(REPLY_TOKEN, "").trim();
     const isSticker = Boolean(text) && !images.length && EMOJI_ONLY.test(text) && /\p{Extended_Pictographic}/u.test(text);

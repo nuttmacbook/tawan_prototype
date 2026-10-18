@@ -556,22 +556,6 @@ async function handleApiNow(req, res, url) {
             return send(res, 404, { error: err?.message ?? "ไม่พบรูป" });
         }
     }
-    // Her own photos (data/personas/<id>/photos), only names that are really in that folder
-    if (req.method === "GET" && url.pathname.startsWith("/api/photo/")) {
-        let name = "";
-        try {
-            name = decodeURIComponent(url.pathname.slice(11));
-        } catch {}
-        const file = await world.photoFile(name);
-        if (!file) return send(res, 404, { error: "ไม่พบรูป" });
-        try {
-            const ext = path.extname(file).slice(1).toLowerCase();
-            res.writeHead(200, { "content-type": `image/${ext === "jpg" ? "jpeg" : ext}`, "cache-control": "private, max-age=86400" });
-            return res.end(await readFile(file));
-        } catch {
-            return send(res, 404, { error: "ไม่พบรูป" });
-        }
-    }
     // A character file is a download, not JSON for the page
     if (req.method === "GET" && url.pathname === "/api/profiles/export") {
         try {

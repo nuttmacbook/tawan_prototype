@@ -55,8 +55,8 @@
 | เครื่องมือที่ตัวละครใช้ (จำ/สอน/อารมณ์/เรื่องค้าง/ไดอารี่) | `server/brain.js` | `TOOLS`, `HANDLERS` |
 | จำนวน bubble สูงสุด, ระยะไม่ทักซ้ำ | `server/brain.js` | `MAX_BUBBLES`, `GREET_COOLDOWN_MS` |
 | เรื่องค้าง / ไดอารี่ / คนรอบตัว (people.md) | `server/life.js` | `notePerson()`, `peopleFor()` |
-| วันนี้ของเธอ: ค้นเน็ตตอนเช้า (อากาศ ซีรี่ ข่าว แผนของวัน เรื่องยาว), เมือง, รูปของเธอ | `server/world.js` (test: `test/world.test.js`) | `maybeRefresh()` (เรียกจาก `away.js` ทุกนาที), `RESEARCH_SYSTEM`, `cleanFound()`, `renderToday()`, `unsentPhotos()`, `photoFile()` · route `/api/photo/`, `/api/today/refresh` |
-| ลิงก์/รูปที่เธอส่งได้ (ตัดลิงก์ที่แต่งเอง), เปิดลิงก์ที่ผู้ใช้ส่ง | `server/world.js` + `server/brain.js` | `checkShared()`, `checkReply()`, `turn()` (`web.fetch`, `turnOpenedLinks` กันหน้าเว็บสั่งสอนนิสัย) · ฝั่งหน้าเว็บ `withLinks()`, `HER_PHOTO` ใน `src/components/chat.js` |
+| วันนี้ของเธอ: ค้นเน็ตตอนเช้า (อากาศ ซีรี่ ข่าว แผนของวัน เรื่องยาว), เมือง | `server/world.js` (test: `test/world.test.js`) | `maybeRefresh()` (เรียกจาก `away.js` ทุกนาที), `RESEARCH_SYSTEM`, `cleanFound()`, `renderToday()` · route `/api/today/refresh` |
+| ลิงก์ที่เธอส่งได้ (ตัดลิงก์ที่แต่งเอง), เปิดลิงก์ที่ผู้ใช้ส่ง | `server/world.js` + `server/brain.js` | `checkShared()`, `checkReply()`, `turn()` (`web.fetch`, `turnOpenedLinks` กันหน้าเว็บสั่งสอนนิสัย) · ฝั่งหน้าเว็บ `withLinks()` ใน `src/components/chat.js` |
 | จำเลือนเรื่องเล็กที่เก่า | `server/recall.js` | `selectMemory({ fadeDays })`, `KEEP_TOPICS` |
 | อ่าน/เขียนไฟล์ .md | `server/store.js` | |
 | เรียก Claude ในเครื่อง / API | `server/llm.js` | |

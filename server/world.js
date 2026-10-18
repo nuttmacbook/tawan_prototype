@@ -1,4 +1,4 @@
-import { readFile, readdir } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { activeDir, currentId, loadSettings } from "./profiles.js";
 import { FILES, safeRead, today } from "./store.js";
@@ -20,13 +20,10 @@ import { findLinks } from "../src/links.js";
 const RETRY_MS = 3 * 3600000;          // a failed look-up waits this long before trying again
 const ACTIVE_DAYS = 7;                 // characters nobody talked to for a week don't get a look-up
 const RESEARCH_TIMEOUT_MS = 6 * 60000;
-const MAX_SENT_PHOTOS = 300;
-const PHOTO_EXT = /\.(jpe?g|png|webp|gif)$/i;
 
 const lifeFile = () => path.join(activeDir(), "life.json");
-const photosDir = () => path.join(activeDir(), "photos");
 
-/** life.json: { city, stories, sentPhotos, lastTry, today: { date, ...what the look-up found } } */
+/** life.json: { city, stories, lastTry, today: { date, ...what the look-up found } } */
 export async function loadLife() {
     try {
         const value = JSON.parse(await readFile(lifeFile(), "utf8"));
@@ -74,45 +71,6 @@ export async function knownLinks() {
         ...(info?.shows ?? []).map((s) => s.url),
         ...(info?.interests ?? []).map((s) => s.url),
     ].filter(Boolean));
-}
-
-/* ------------------------------------ her photos */
-
-/**
- * Pictures you put in data/personas/<id>/photos/ for her to send, named by what's in them
- * ("ทะเลตอนเย็น.jpg"). Ones she already sent are left out so she doesn't send the same twice.
- */
-export async function unsentPhotos() {
-    let names = [];
-    try {
-        names = (await readdir(photosDir())).filter((f) => PHOTO_EXT.test(f) && !f.startsWith("."));
-    } catch {
-        return [];
-    }
-    const sent = new Set((await loadLife()).sentPhotos ?? []);
-    return names.filter((n) => !sent.has(n)).sort();
-}
-
-export const markPhotoSent = (name) =>
-    changeLife((life) => {
-        life.sentPhotos = [ ...(life.sentPhotos ?? []).filter((n) => n !== name), name ].slice(-MAX_SENT_PHOTOS);
-    });
-
-export const unmarkPhotoSent = (name) =>
-    changeLife((life) => {
-        life.sentPhotos = (life.sentPhotos ?? []).filter((n) => n !== name);
-    });
-
-/** Her photo names in bubbles ("[รูปเธอ:name]") */
-export const photosIn = (bubbles) =>
-    (bubbles ?? []).flatMap((b) => [ ...String(b ?? "").matchAll(/\[รูปเธอ:([^\]]+)\]/g) ].map((m) => m[1]));
-
-/** The file behind a photo name, only if it really is one of hers (no paths, no other folders) */
-export async function photoFile(name) {
-    const clean = String(name ?? "");
-    if (!clean || clean !== path.basename(clean) || !PHOTO_EXT.test(clean)) return null;
-    const names = await readdir(photosDir()).catch(() => []);
-    return names.includes(clean) ? path.join(photosDir(), clean) : null;
 }
 
 /* ------------------------------------ the morning look-up */
@@ -318,7 +276,8 @@ export function renderToday(info, name = "เธอ") {
 
 /* ------------------------------------ what she may put in a bubble */
 
-const SEND_PHOTO = /\[ส่งรูป\s*[:：]\s*([^\]\n]{1,120})\]/g;
+// She can't send pictures of herself yet; a made-up photo token would show as a broken picture
+const PHOTO_TOKEN = /\[(?:ส่งรูป|รูปเธอ)\s*[:：][^\]\n]*\]/g;
 
 /** Links in a text, e.g. the ones you sent her this turn */
 export const linksIn = (text) => findLinks(text).map((l) => l.url);
@@ -338,37 +297,23 @@ function keepLinks(text, okLinks, dropped) {
 
 /**
  * Her bubbles made safe to show: a link she didn't really find (today's look-up) or get from you
- * is taken out, and "[ส่งรูป:name]" becomes a real photo only when it's one of hers.
- * A bubble left empty is dropped.
+ * is taken out, and so is a photo she pretends to send. A bubble left empty is dropped.
  * @param {string[]} bubbles
- * @param {{ links?: Iterable<string>, photos?: string[] }} allowed
- * @returns {{ bubbles: string[], photos: string[], dropped: string[] }}
+ * @param {{ links?: Iterable<string> }} allowed
+ * @returns {{ bubbles: string[], dropped: string[] }}
  */
-export function checkShared(bubbles, { links = [], photos = [] } = {}) {
+export function checkShared(bubbles, { links = [] } = {}) {
     const okLinks = new Set(links);
-    const okPhotos = new Set(photos);
-    const sent = [];
     const dropped = [];
     const out = [];
     for (const raw of bubbles ?? []) {
         let text = keepLinks(String(raw ?? ""), okLinks, dropped);
-        text = text.replace(SEND_PHOTO, (_, name) => {
-            const clean = name.trim();
-            if (okPhotos.has(clean) && !sent.includes(clean)) {
-                sent.push(clean);
-                return `[รูปเธอ:${clean}]`;
-            }
-            dropped.push(`รูป ${clean}`);
-            return "";
-        });
-        // She can't hand-write the token for a photo; only [ส่งรูป:...] above makes one
-        text = text.replace(/\[รูปเธอ:([^\]]*)\]/g, (m, name) => {
-            if (sent.includes(name) && out.every((b) => !b.includes(m))) return m;
-            dropped.push(`รูป ${name}`);
+        text = text.replace(PHOTO_TOKEN, (m) => {
+            dropped.push(m);
             return "";
         });
         text = text.replace(/[ \t]{2,}/g, " ").trim();
         if (text) out.push(text);
     }
-    return { bubbles: out, photos: sent, dropped };
+    return { bubbles: out, dropped };
 }

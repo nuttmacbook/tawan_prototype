@@ -1,8 +1,8 @@
-// Her day from the web, people around her, photos, links and fading memories.
+// Her day from the web, people around her, links and fading memories.
 // No brain and no network: only the parts that check, store and choose.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -45,33 +45,19 @@ test("renderToday: what she reads is marked as web data", () => {
     assert.match(md, /22:00–02:00 ทำเกม/);
 });
 
-/* ------------------------------------ links and photos in her bubbles */
+/* ------------------------------------ links in her bubbles */
 
-test("checkShared: only real links and her own photos get through", () => {
+test("checkShared: only real links get through, and no pretend photos", () => {
     const out = world.checkShared(
-        [ "ดูอันนี้ https://example.com/song", "https://made.up/fake", "[ส่งรูป:ทะเล.jpg] ทะเลตอนเย็น", "[ส่งรูป:../../etc.jpg]", "[รูปเธอ:แอบใส่.jpg] ฮะ" ],
-        { links: [ "https://example.com/song" ], photos: [ "ทะเล.jpg" ] },
+        [ "ดูอันนี้ https://example.com/song", "https://made.up/fake", "[ส่งรูป:ทะเล.jpg] ทะเลตอนเย็น", "[รูปเธอ:แอบใส่.jpg]" ],
+        { links: [ "https://example.com/song" ] },
     );
-    assert.deepEqual(out.bubbles, [ "ดูอันนี้ https://example.com/song", "[รูปเธอ:ทะเล.jpg] ทะเลตอนเย็น", "ฮะ" ]);
-    assert.deepEqual(out.photos, [ "ทะเล.jpg" ]);
+    assert.deepEqual(out.bubbles, [ "ดูอันนี้ https://example.com/song", "ทะเลตอนเย็น" ]);
     assert.equal(out.dropped.length, 3);
 });
 
 test("linksIn: trailing punctuation isn't part of the link", () => {
     assert.deepEqual(world.linksIn("ดูนี่ https://example.com/a?b=1, แล้วก็ (https://x.org/y)."), [ "https://example.com/a?b=1", "https://x.org/y" ]);
-});
-
-test("photos: only files really in her folder, once each", async () => {
-    const dir = path.join(profiles.activeDir(), "photos");
-    await mkdir(dir, { recursive: true });
-    await writeFile(path.join(dir, "ทะเล.jpg"), "x");
-    await writeFile(path.join(dir, "notes.txt"), "x");
-    assert.deepEqual(await world.unsentPhotos(), [ "ทะเล.jpg" ]);
-    assert.ok(await world.photoFile("ทะเล.jpg"));
-    assert.equal(await world.photoFile("../settings.json"), null);
-    assert.equal(await world.photoFile("notes.txt"), null);
-    await world.markPhotoSent("ทะเล.jpg");
-    assert.deepEqual(await world.unsentPhotos(), []);
 });
 
 /* ------------------------------------ people around her */
@@ -117,5 +103,4 @@ test("links: Thai right after a link and a closing bracket in a link", () => {
         links: [ "https://youtu.be/abc", "https://en.wikipedia.org/wiki/Foo_(band)" ],
     });
     assert.deepEqual(out.bubbles, [ "ลองฟัง https://youtu.be/abcน่ารักมาก", "https://en.wikipedia.org/wiki/Foo_(band)" ]);
-    assert.deepEqual(world.photosIn([ "[รูปเธอ:ทะเล.jpg] สวย", "ไม่มี" ]), [ "ทะเล.jpg" ]);
 });
