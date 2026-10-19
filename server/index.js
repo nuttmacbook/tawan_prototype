@@ -14,7 +14,7 @@ process.on("unhandledRejection", (err) => console.error("unhandled:", err?.stack
 
 const {
     chat, greet, nudge, warmUp, resetSession, personaName, brainMode, consolidateHistory, compactMemory, hasApiKey, presence,
-    addReaction, awayPing, switchExclusive, forgetSession, noteUnsent, promptStats, cutLastReply,
+    addReaction, awayPing, switchExclusive, forgetSession, noteUnsent, promptStats, cutLastReply, complete, afterthought, cancelAfterthought,
 } = await import("./brain.js");
 const profiles = await import("./profiles.js");
 const away = await import("./away.js");
@@ -29,6 +29,7 @@ const { loadThreads } = await import("./life.js");
 const { styleSettings } = await import("./humanize.js");
 const config = await import("./config.js");
 const world = await import("./world.js");
+const coach = await import("./coach.js");
 const { claudeCodeStatus, API_MODEL, CC_MODEL } = await import("./llm.js");
 const { isLocal, clientIp, isHttps, lanAddresses, makeHostCheck, isOwnPage } = await import("./gate.js");
 
@@ -370,6 +371,17 @@ const routes = {
         return { ok: true, city: info?.city ?? "", text: await store.readEditable("today") };
     },
 
+    // The coach's suggestions from reading past chats; each waits for you to accept or dismiss it
+    "GET /api/coach": async () => ({ suggestions: (await coach.loadCoach()).suggestions }),
+    "POST /api/coach/review": async () => {
+        const result = await coach.reviewNow(complete);
+        return { result, suggestions: (await coach.loadCoach()).suggestions };
+    },
+    "POST /api/coach/decide": async (body) => {
+        const message = await coach.decide(String(body?.id ?? ""), body?.accept === true);
+        return { message, suggestions: (await coach.loadCoach()).suggestions, teachings: await store.listTeachings() };
+    },
+
     "GET /api/search": async (_, url) => ({ results: await store.searchHistory(url.searchParams.get("q")) }),
 
     "GET /api/status": statusPayload,
@@ -385,6 +397,7 @@ const routes = {
     "POST /api/send": async (body) => {
         if (!away.isActiveClient(body?.clientId)) throw new Error("แชทนี้เปิดใช้งานอยู่ที่อื่น");
         await store.addPending({ id: body?.id, text: body?.text });
+        cancelAfterthought();
         return { ok: true };
     },
 
@@ -478,6 +491,12 @@ const routes = {
         return { ...(await greet()), status: await statusPayload() };
     },
 
+    // "เห้ย ลืมบอก": the page asks when the time the server picked has come; empty if it passed
+    "POST /api/afterthought": async (body) => {
+        // A tab that lost the chat to another device mustn't use it up where nobody sees it
+        if (!away.isActiveClient(body?.clientId)) return { bubbles: [], notes: [] };
+        return { ...(await afterthought()), status: await statusPayload() };
+    },
     "POST /api/nudge": async (body) => ({ ...(await nudge(Number(body?.minutes ?? 15))), status: await statusPayload() }),
 
     "POST /api/reset": async () => {

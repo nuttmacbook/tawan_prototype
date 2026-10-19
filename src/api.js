@@ -42,6 +42,7 @@ export const api = {
     restart: (backupId) => call("/api/restart", { backupId }),
     greet: () => call("/api/greet", {}),
     nudge: (minutes) => call("/api/nudge", { minutes }),
+    afterthought: (clientId) => call("/api/afterthought", { clientId }),
     reset: () => call("/api/reset", {}),
     teachings: () => call("/api/teachings"),
     teach: (lesson) => call("/api/teach", lesson),
@@ -74,4 +75,7 @@ export const api = {
     readFile: (name) => call(`/api/file?name=${encodeURIComponent(name)}`),
     writeFile: (name, text) => call("/api/file", { name, text }),
     refreshToday: () => call("/api/today/refresh", {}),
+    coach: () => call("/api/coach"),
+    coachReview: () => call("/api/coach/review", {}),
+    coachDecide: (id, accept) => call("/api/coach/decide", { id, accept }),
 };

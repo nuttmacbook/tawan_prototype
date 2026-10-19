@@ -2,7 +2,9 @@ import { loadState } from "./mood.js";
 import { planReply } from "./pacing.js";
 import { loadSettings, saveSettings, currentId, pinProfile, getActiveId, listProfiles } from "./profiles.js";
 import { getConfig } from "./config.js";
-import { maybeRefresh } from "./world.js";
+import { maybeRefresh, dayKind } from "./world.js";
+import { maybeReview } from "./coach.js";
+import { complete, afterthought, isAfterthoughtDue } from "./brain.js";
 
 /* ------------------------------------ config */
 
@@ -118,8 +120,15 @@ export function startAwayScheduler(send, deps) {
         try {
             // Her morning look-up runs in the background (still pinned to her), even while you chat
             maybeRefresh();
+            maybeReview(complete);
             if (isOnScreen && isChatOpen()) return;
             if (deps && (await answerWhileClosed(deps))) return;
+            // You closed the chat right after talking: what she remembers later still reaches you
+            if (isAfterthoughtDue() && !(await planReply({ texts: [] })).isAsleep) {
+                const later = await afterthought();
+                if (later?.bubbles?.length) await deps?.onAgentMessage?.(later.bubbles.filter((_, i) => !(later.unsend ?? []).includes(i)));
+                return;
+            }
             const { awayPingHours: AWAY_HOURS, awayPerDay: MAX_PER_DAY } = await getConfig();
             // 0 really means off (it used to fall back to 4 hours)
             if (!(AWAY_HOURS > 0) || !(MAX_PER_DAY > 0) || Math.random() > CHANCE_PER_CHECK) return;
@@ -140,6 +149,8 @@ export function startAwayScheduler(send, deps) {
             if (Date.now() - Number(log.lastAt ?? 0) < AWAY_HOURS * 3600000) return;
 
             if ((await planReply({ texts: [] })).isAsleep) return;
+            // Out all day or swamped: she isn't the one who texts first today
+            if ([ "busy", "away", "moody" ].includes(await dayKind())) return;
 
             const result = await send(quietHours);
             if (!result?.bubbles?.length) return;

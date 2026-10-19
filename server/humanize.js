@@ -191,3 +191,75 @@ export function repetitionNote(bubbles) {
     ].filter(Boolean);
     return lines.join("\n");
 }
+
+/* ------------------------------------ the shape of this turn */
+
+// Thai questions usually end in a particle, not "?"
+const QUESTION_END = new RegExp(
+    // A bare "ยัง" is an answer; "กินข้าวยัง" is a question
+    "(?:\\?|หรอ|เหรอ|ป่ะ|ปะ|มั้ย|ไหม|เปล่า|ป่าว|รึยัง|(?<=\\S)ยัง)\\s*[?!~.]*$" +
+    // "ไปไหนมา", "ทำไรอยู่", "เรื่องไรอ่ะ": the question word, then a particle or two
+    // "ไม่ไปไหน", "ไม่มีใคร", "ไม่รู้ทำไม" are statements
+    "|(?<!ไม่(?:ได้)?ไป|ไม่มี|ไม่รู้|ไม่รู้ว่า)(?:ไหน|(?<!เป็น)ไร|ยังไง|ใคร|เมื่อไหร่|ทำไม|กี่โมง)(?:มา|อยู่|อ่ะ|อะ|ล่ะ|นะ|กัน|ดี|บ้าง|เนี่ย|เลย)*\\s*[?!~.]*$",
+);
+export const isQuestion = (t) => QUESTION_END.test(String(t ?? "").trim());
+
+// Not "สบาย" (ไม่สบาย, สบายดี) and not "ไปนอนได้แล้ว" said out of care
+export const GOODBYE = /ฝันดี|ไปนอน(?:ละ|ก่อน|แล้วนะ)|นอนละ|นอนก่อนนะ|(?<!ส)บายย*|ไว้คุยกัน|ไปก่อนนะ|ไปละ|เจอกันพรุ่งนี้|good ?night|\bgn\b/i;
+const bubblesOf = (t) => String(t?.text ?? "").split(/\n\s*\n/).map((b) => b.trim()).filter(Boolean);
+// Lines the app adds ("[ระบบ: ...]") aren't something the user typed
+const typedBy = (t) => String(t?.text ?? "").split("\n").filter((l) => l.trim() && !/^\[ระบบ/.test(l.trim()));
+
+/**
+ * How this turn should go, from the shape of the chat so far. Each rule fixes something that made her
+ * read like a bot in real chats: the same question again, four bubbles for "โอเค",
+ * a question at the end of every reply, and saying goodbye over and over.
+ * @param {{ role: string, text: string }[]} turns short-term memory, oldest first, the current user turn last
+ * @returns {{ note: string, maxBubbles: number }}
+ */
+export function rhythmFor(turns) {
+    const list = Array.isArray(turns) ? turns : [];
+    const mine = list.filter((t) => t?.role === "assistant").slice(-6);
+    const users = list.filter((t) => t?.role === "user");
+    const now = typedBy(users.at(-1));
+    const chars = now.reduce((n, l) => n + Array.from(l).length, 0);
+    const asks = now.some(isQuestion);
+    const lines = [];
+
+    // Her length follows yours: a one-word message doesn't get a speech
+    let maxBubbles = !now.length ? 3 : chars <= 12 ? 2 : chars <= 40 ? 3 : 4;
+    if (asks) maxBubbles = Math.min(4, maxBubbles + 1);
+    if (now.length && chars <= 12 && !asks) lines.push("- ผู้ใช้พิมพ์สั้นมาก ตอบสั้นตาม 1–2 bubble หรือแค่กดรีแอคก็พอ");
+
+    const asked = [ ...new Set(mine.flatMap(bubblesOf).filter(isQuestion)) ].slice(-6);
+    if (asked.length) lines.push(`- คำถามที่คุณถามไปแล้ว (ห้ามถามซ้ำหรือถามความหมายเดียวกัน ถ้าผู้ใช้ตอบแล้วให้ต่อจากคำตอบนั้น): ${asked.map((q) => `"${q}"`).join(" · ")}`);
+
+    const endsAsking = mine.slice(-3).filter((t) => isQuestion(bubblesOf(t).at(-1))).length;
+    if (endsAsking >= 2) lines.push("- คุณปิดท้ายด้วยคำถามติดกันหลายรอบแล้ว รอบนี้ไม่ต้องถาม เล่าเรื่องตัวเองหรือแสดงความเห็นแทน");
+
+    // Once you've both said goodnight, one short line (or nothing) ends it. Only the exchange just
+    // before this message counts: last night's goodnight shouldn't cut this morning short.
+    const last = list.at(-2);
+    const before = list.at(-3);
+    const saidBye = last?.role === "assistant" && [ last, before?.role === "user" ? before : null ]
+        .some((t) => t && GOODBYE.test(String(t.text ?? "")));
+    if (saidBye && now.length && chars <= 15) {
+        lines.push("- บอกลากันไปแล้ว ถ้าจะตอบ ตอบสั้นมาก 1 bubble หรือกดรีแอค หรืออ่านแล้วไม่ตอบ ห้ามบอกลาซ้ำหรือเปิดเรื่องใหม่");
+        maxBubbles = 1;
+    }
+    return { note: lines.join("\n"), maxBubbles };
+}
+
+/**
+ * Keeps a reply within the turn's length. Extra bubbles go into the last one, so nothing she meant
+ * to say is lost; the prompt already asks for fewer, this only catches a model that ignored it.
+ */
+export function capBubbles(bubbles, max) {
+    const list = Array.isArray(bubbles) ? bubbles : [];
+    if (!(max > 0) || list.length <= max) return list;
+    // A sticker or a quote token only works at the start of its own bubble, so those extras are dropped
+    const extra = list.slice(max - 1)
+        .map((b, i) => (i ? String(b ?? "").replace(/^\[ตอบกลับ "[^"]*"\]\s*/, "") : b))
+        .filter((b, i) => !i || !/^(?:\p{Extended_Pictographic}|\p{Emoji_Modifier}|\u200d|\ufe0f|\s)+$/u.test(b));
+    return [ ...list.slice(0, max - 1), extra.join(" ") ];
+}

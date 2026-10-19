@@ -45,6 +45,7 @@ export function createEngine({ api, ui, settings, timers = realTimers }) {
         hasRethought: false,
         nudges: 0,
         idleTimer: null,
+        afterTimer: null,
         // Until then she's away from her phone (shower, asleep): the header shows when she was last on
         offlineUntil: 0,
     };
@@ -265,6 +266,7 @@ export function createEngine({ api, ui, settings, timers = realTimers }) {
             }
             s.hasRethought = false;
             await cutReply(result, await speak(result, plan, startedAt));
+            armAfterthought(Number(result?.afterthoughtInMs ?? 0));
         } catch (err) {
             ui.setTyping(false);
             ui.markFailed(batch, err);
@@ -281,6 +283,41 @@ export function createEngine({ api, ui, settings, timers = realTimers }) {
     }
 
     /* ------------------------------------ she talks first */
+
+    /** "เห้ย ลืมบอก": the server picked a moment a few minutes after her reply; the page asks then */
+    function armAfterthought(ms) {
+        stopAfterthought();
+        if (!(ms > 0) || !api.afterthought) return;
+        s.afterTimer = t.setTimeout(async () => {
+            s.afterTimer = null;
+            // Already talking again: the moment passed
+            if (s.isReplying || s.isReading || s.pending.length) return;
+            s.isReplying = true;
+            try {
+                const plan = await getPlan([]);
+                s.isInterrupted = false;
+                // You wrote while she looked at the time: answer that instead
+                const result = plan.isAsleep || s.pending.length ? null : await api.afterthought(settings().clientId);
+                if (result?.bubbles?.length) {
+                    ui.setTyping(true);
+                    await cutReply(result, await speak(result, plan, t.now()));
+                }
+            } catch (err) {
+                console.error(err);
+            } finally {
+                s.isReplying = false;
+                s.isInterrupted = false;
+                ui.setPresence();
+                armIdle();
+                if (s.pending.length) schedule();
+            }
+        }, ms);
+    }
+
+    function stopAfterthought() {
+        t.clearTimeout(s.afterTimer);
+        s.afterTimer = null;
+    }
 
     function stopIdle() {
         t.clearTimeout(s.idleTimer);
@@ -352,6 +389,7 @@ export function createEngine({ api, ui, settings, timers = realTimers }) {
         glance,
         armIdle,
         stopIdle,
+        stopAfterthought,
         greet,
         schedule,
 
@@ -361,6 +399,7 @@ export function createEngine({ api, ui, settings, timers = realTimers }) {
         /** Your message reached the server: she'll read it when the plan says so */
         add({ id, text, sentAt = t.now(), isRead = false }) {
             s.pending.push({ id, text, sentAt, isRead });
+            stopAfterthought();
             if (!isRead) ui.setReceipts([ id ], "ส่งแล้ว");
             if (s.isReplying && !s.isAway && shouldInterrupt(text)) s.isInterrupted = true;
             s.nudges = 0;

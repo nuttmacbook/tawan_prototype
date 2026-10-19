@@ -14,6 +14,7 @@ export const FIELDS = {
     pushPreview:     { type: "bool",   env: "PUSH_PREVIEW",     def: true,                         label: "แสดงข้อความในแจ้งเตือน (ปิด = ขึ้นแค่ว่ามีข้อความ)" },
     worldDaily:      { type: "bool",   env: "WORLD_DAILY",      def: true,                         label: "ทุกเช้าค้นเน็ตเรื่องรอบตัวเธอ (อากาศ ซีรี่ เรื่องที่สนใจ แผนของวัน) · ค้นวันละครั้งต่อตัวละคร" },
     openLinks:       { type: "bool",   env: "OPEN_LINKS",       def: true,                         label: "เปิดอ่านลิงก์ที่คุณส่งให้เธอ (รอบนั้นตอบช้าลงเล็กน้อย)" },
+    coachDaily:      { type: "bool",   env: "COACH_DAILY",      def: true,                         label: "โค้ชอ่านแชทของเมื่อวานแล้วเสนอบทเรียน (ต้องกดรับเองในแถบสอน)" },
     memoryFadeDays:  { type: "number", env: "MEMORY_FADE_DAYS", def: 60,   min: 0,    max: 730,    label: "เรื่องเล็กที่เก่ากว่ากี่วันจะจำเลือน ถ้าไม่ได้พูดถึง (0 = จำทุกอย่าง)" },
 };
 

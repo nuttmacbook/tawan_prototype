@@ -2,7 +2,7 @@ import "./main.css";
 import { api } from "./api.js";
 import { header, brainPicker, subline, fullRoleButton, remoteLinks } from "./components/header.js";
 import { chatPanel, bubble, note, typing, errorLine, statusAside, pacingNote, stateNote, correctionForm, previewOf, divider, unsentLine } from "./components/chat.js";
-import { teachPanel, lessonList, snapshotList, configFields, FILES } from "./components/teach.js";
+import { teachPanel, lessonList, snapshotList, configFields, coachList, FILES } from "./components/teach.js";
 import { overlays, searchResults } from "./components/overlays.js";
 import { logicPanel, logicEvent, backupList, logicWorking } from "./components/logic.js";
 import { esc } from "./components/ui.js";
@@ -104,6 +104,18 @@ function renderLessons() {
     if (el) el.innerHTML = lessonList(state.teachings);
     const count = $("[data-lesson-count]");
     if (count) count.textContent = String(state.teachings.length);
+}
+
+function renderCoach() {
+    const el = $("[data-coach-list]");
+    if (el) el.innerHTML = coachList(state.coach);
+}
+
+async function refreshCoach() {
+    try {
+        state.coach = (await api.coach())?.suggestions ?? [];
+        renderCoach();
+    } catch {}
 }
 
 function renderName() {
@@ -257,6 +269,7 @@ if (typeof window !== "undefined") {
         document.querySelectorAll("[data-tab-btn]").forEach((el) => el.setAttribute("aria-selected", String(el.dataset.tabBtn === id)));
         if (id === "teach" && !$("[data-file-text]")?.value) window.openFile(state.file);
         if (id === "teach") {
+            refreshCoach();
             refreshSnapshots();
             refreshBackupInfo();
             refreshConfig();
@@ -550,6 +563,39 @@ if (typeof window !== "undefined") {
             if (msg) msg.textContent = `data/${name}.md · มีผลทันทีในข้อความถัดไป`;
         } catch (err) {
             if (msg) msg.textContent = err.message;
+        }
+    };
+
+    window.reviewCoach = async () => {
+        const btn = $("[data-coach-review]");
+        const msg = $("[data-coach-msg]");
+        if (btn) btn.disabled = true;
+        if (msg) msg.textContent = "โค้ชกำลังอ่านแชท…";
+        try {
+            const res = await api.coachReview();
+            state.coach = res?.suggestions ?? [];
+            renderCoach();
+            if (msg) msg.textContent = res?.result ? `✓ อ่านแชทวันที่ ${res.result.date} ได้ ${res.result.added} ข้อเสนอ` : "ยังไม่มีแชทของวันก่อน ๆ ให้อ่าน";
+        } catch (err) {
+            if (msg) msg.textContent = err?.message ?? String(err);
+        } finally {
+            if (btn) btn.disabled = false;
+        }
+    };
+
+    window.decideCoach = async (el) => {
+        const msg = $("[data-coach-msg]");
+        try {
+            const res = await api.coachDecide(el?.dataset?.coachId ?? "", el?.dataset?.accept === "1");
+            state.coach = res?.suggestions ?? [];
+            renderCoach();
+            if (Array.isArray(res?.teachings)) {
+                state.teachings = res.teachings;
+                renderLessons();
+            }
+            if (msg) msg.textContent = `✓ ${res?.message ?? ""}`;
+        } catch (err) {
+            if (msg) msg.textContent = err?.message ?? String(err);
         }
     };
 
@@ -958,7 +1004,10 @@ function setElsewhere(isElsewhere) {
     const el = $("[data-elsewhere]");
     el?.classList.toggle("hidden", !isElsewhere);
     el?.classList.toggle("grid", isElsewhere);
-    if (isElsewhere) engine.stopIdle();
+    if (isElsewhere) {
+        engine.stopIdle();
+        engine.stopAfterthought();
+    }
 }
 
 // Tell the server right away when the chat is hidden or closed, so her next message becomes a push
