@@ -14,7 +14,7 @@ process.on("unhandledRejection", (err) => console.error("unhandled:", err?.stack
 
 const {
     chat, greet, nudge, warmUp, resetSession, personaName, brainMode, consolidateHistory, compactMemory, hasApiKey, presence,
-    addReaction, awayPing, switchExclusive, forgetSession, noteUnsent, promptStats, cutLastReply,
+    addReaction, awayPing, switchExclusive, forgetSession, noteUnsent, promptStats, cutLastReply, complete,
 } = await import("./brain.js");
 const profiles = await import("./profiles.js");
 const away = await import("./away.js");
@@ -29,6 +29,7 @@ const { loadThreads } = await import("./life.js");
 const { styleSettings } = await import("./humanize.js");
 const config = await import("./config.js");
 const world = await import("./world.js");
+const coach = await import("./coach.js");
 const { claudeCodeStatus, API_MODEL, CC_MODEL } = await import("./llm.js");
 const { isLocal, clientIp, isHttps, lanAddresses, makeHostCheck, isOwnPage } = await import("./gate.js");
 
@@ -368,6 +369,17 @@ const routes = {
     "POST /api/today/refresh": async () => {
         const info = await world.refreshNow();
         return { ok: true, city: info?.city ?? "", text: await store.readEditable("today") };
+    },
+
+    // The coach's suggestions from reading past chats; each waits for you to accept or dismiss it
+    "GET /api/coach": async () => ({ suggestions: (await coach.loadCoach()).suggestions }),
+    "POST /api/coach/review": async () => {
+        const result = await coach.reviewNow(complete);
+        return { result, suggestions: (await coach.loadCoach()).suggestions };
+    },
+    "POST /api/coach/decide": async (body) => {
+        const message = await coach.decide(String(body?.id ?? ""), body?.accept === true);
+        return { message, suggestions: (await coach.loadCoach()).suggestions, teachings: await store.listTeachings() };
     },
 
     "GET /api/search": async (_, url) => ({ results: await store.searchHistory(url.searchParams.get("q")) }),

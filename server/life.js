@@ -1,5 +1,7 @@
+import { readdir } from "node:fs/promises";
+import path from "node:path";
 import { updateText } from "./fsutil.js";
-import { FILES, safeRead, today, appendToSection, lastSections, splitSections, joinSections, sectionTitle, remember } from "./store.js";
+import { FILES, safeRead, today, appendToSection, lastSections, splitSections, joinSections, sectionTitle, remember, historyDir } from "./store.js";
 
 /* ------------------------------------ threads (เรื่องค้าง) */
 
@@ -174,3 +176,85 @@ export async function peopleFor(query) {
     }
     return `${chosen.join("\n\n")}\n\n(ยังมีคนอื่นอีก ${doc.sections.length - chosen.length} คน ถ้าพูดถึงคนที่ไม่อยู่ในนี้ ใช้ชื่อเดิมที่เคยเล่า ไม่ต้องตั้งชื่อใหม่)`;
 }
+
+/* ------------------------------------ special days (dates.md) */
+
+const DATES_HEAD = [
+    "# วันสำคัญ",
+    "",
+    "> วันที่ตัวละครควรจำ ระบบเพิ่มเองเมื่อคุณเล่า (เช่น วันเกิด) แก้หรือเพิ่มเองได้",
+    "> รูปแบบ: \"- 03-14 | วันเกิดผู้ใช้\" (เดือน-วัน = ทุกปี) หรือ \"- 2026-11-02 | สัมภาษณ์งานของผู้ใช้\" (ครั้งเดียว)",
+    "",
+].join("\n");
+const DATE_LINE = /^- (\d{4}-)?(\d{2})-(\d{2}) \| (.+)$/;
+
+/** "3/14", "14-03", "2026-03-14" → "03-14" or "2026-03-14"; anything unclear → "" */
+export function cleanDate(raw) {
+    const s = String(raw ?? "").trim();
+    let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+    if (m) return valid(m[2], m[3]) ? `${m[1]}-${pad(m[2])}-${pad(m[3])}` : "";
+    m = s.match(/^(\d{1,2})-(\d{1,2})$/);
+    if (m) return valid(m[1], m[2]) ? `${pad(m[1])}-${pad(m[2])}` : "";
+    return "";
+}
+const pad = (n) => String(n).padStart(2, "0");
+const valid = (mm, dd) => Number(mm) >= 1 && Number(mm) <= 12 && Number(dd) >= 1 && Number(dd) <= 31;
+
+/**
+ * Remembers a date worth greeting on. A yearly one (birthday) as "MM-DD", a one-off as "YYYY-MM-DD".
+ * The same thing told again replaces its old date.
+ */
+export async function noteDate({ what, date } = {}) {
+    const about = oneLine(what, 80).replace(/\|/g, "/");
+    const when = cleanDate(date);
+    if (!about || !when) return "ต้องมีเรื่องและวันที่ (เดือน-วัน หรือ ปี-เดือน-วัน)";
+    await updateText(FILES.dates, (text) => {
+        const lines = String(text || DATES_HEAD).split("\n").filter((l) => !(DATE_LINE.test(l) && l.split("|")[1]?.trim() === about));
+        return `${lines.join("\n").trimEnd()}\n- ${when} | ${about}\n`;
+    });
+    return `จำวันสำคัญ: ${when} ${about}`;
+}
+
+const dayStart = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
+
+/**
+ * Dates from dates.md coming up in the next few days, plus how long you've been talking.
+ * @param {string} text dates.md
+ * @param {{ now?: Date, firstChat?: string, days?: number }} [options] firstChat: YYYY-MM-DD of the first day you talked
+ * @returns {string[]} lines like "วันนี้: วันเกิดผู้ใช้"
+ */
+export function upcomingDays(text, { now = new Date(), firstChat = "", days = 3 } = {}) {
+    const base = dayStart(now);
+    const label = (n) => (n === 0 ? "วันนี้" : n === 1 ? "พรุ่งนี้" : `อีก ${n} วัน`);
+    const out = [];
+    for (const l of String(text ?? "").split("\n")) {
+        const m = l.trim().match(DATE_LINE);
+        if (!m) continue;
+        const [ , year, mm, dd, about ] = m;
+        for (let n = 0; n <= days; n++) {
+            const d = new Date(base.getTime() + n * 86400000);
+            const sameDay = d.getMonth() + 1 === Number(mm) && d.getDate() === Number(dd);
+            if (sameDay && (!year || d.getFullYear() === Number(year.slice(0, 4)))) out.push(`${label(n)}: ${about.trim()}`);
+        }
+    }
+    // Milestones only on the day itself; a yearly one on the same date as the first chat
+    if (/^\d{4}-\d{2}-\d{2}$/.test(firstChat)) {
+        const first = new Date(`${firstChat}T00:00:00`);
+        const since = Math.round((base - dayStart(first)) / 86400000);
+        const years = base.getFullYear() - first.getFullYear();
+        if ([ 30, 100, 200, 500, 1000 ].includes(since)) out.push(`วันนี้: คุยกันมาครบ ${since} วัน (เริ่มคุยวันที่ ${firstChat})`);
+        else if (years > 0 && base.getMonth() === first.getMonth() && base.getDate() === first.getDate()) out.push(`วันนี้: คุยกันมาครบ ${years} ปี`);
+    }
+    return out;
+}
+
+/** The first day in the chat logs (today's folder or the archive) */
+export async function firstChatDay() {
+    const dates = [];
+    for (const dir of [ historyDir(), path.join(historyDir(), "archive") ]) {
+        for (const f of await readdir(dir).catch(() => [])) if (/^\d{4}-\d{2}-\d{2}\.md$/.test(f)) dates.push(f.slice(0, 10));
+    }
+    return dates.sort()[0] ?? "";
+}
+
+export const datesNote = async () => upcomingDays(await safeRead(FILES.dates), { firstChat: await firstChatDay() });

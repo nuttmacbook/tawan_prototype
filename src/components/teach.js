@@ -12,6 +12,7 @@ const FILES = [
     { id: "diary",     label: "ไดอารี่",     hint: "ชีวิตของตัวละครเอง" },
     { id: "journal",   label: "บันทึกรายวัน", hint: "สรุปความทรงจำของแต่ละวัน" },
     { id: "people",    label: "คนรอบตัว",   hint: "ชื่อและเรื่องของคนในชีวิตเธอ ให้เล่าถึงใครก็ชื่อเดิม" },
+    { id: "dates",     label: "วันสำคัญ",    hint: "วันเกิดและวันที่ควรจำ รูปแบบ - เดือน-วัน | เรื่อง (ทุกปี) หรือ - ปี-เดือน-วัน | เรื่อง (ครั้งเดียว)" },
     { id: "today",     label: "วันนี้",      hint: "ระบบเขียนใหม่ทุกเช้าจากการค้นเน็ต: อากาศ ซีรี่ เรื่องที่สนใจ แผนของวัน" },
 ];
 
@@ -126,6 +127,44 @@ const lessons = (state) => /*html*/`
             <input type="search" placeholder="ค้นหา" oninput="filterLessons(this.value)" class="${INPUT} !w-36 !py-1.5" aria-label="ค้นหาสิ่งที่สอน" />
         </header>
         <div class="scroll-slim max-h-[32rem] space-y-2 overflow-y-auto pr-1" data-lessons>${lessonList(state?.teachings)}</div>
+    </section>
+`;
+
+/* ------------------------------------ coach */
+
+// Ids come from the server's data, so they go in data-* and are read back with this.dataset
+const coachItem = (s) => /*html*/`
+    <article class="space-y-1.5 rounded-xl bg-slate-950/50 p-3 ring-1 ring-inset ring-white/5">
+        <p class="text-sm text-amber-200">${esc(s?.problem ?? "")} <span class="text-xs text-slate-500">${esc(s?.date ?? "")}</span></p>
+        ${s?.quote ? `<p class="rounded-lg bg-slate-800/70 px-2.5 py-1.5 text-xs text-slate-300">“${esc(s.quote)}”</p>` : ""}
+        <p class="text-xs text-slate-300"><span class="text-slate-500">ถ้า</span> ${esc(s?.lesson?.trigger ?? "")}</p>
+        ${s?.lesson?.response ? `<p class="text-xs text-slate-300"><span class="text-slate-500">ตอบแบบ</span> ${esc(s.lesson.response)}</p>` : ""}
+        ${s?.lesson?.example ? `<p class="text-xs text-sky-200"><span class="text-slate-500">เช่น</span> ${esc(s.lesson.example)}</p>` : ""}
+        <div class="flex gap-2 pt-1">
+            <button type="button" class="${BTN} !py-1 !text-xs" data-coach-id="${esc(s?.id ?? "")}" data-accept="1" onclick="decideCoach(this)">สอนแบบนี้</button>
+            <button type="button" class="${BTN_GHOST} !py-1 !text-xs" data-coach-id="${esc(s?.id ?? "")}" data-accept="0" onclick="decideCoach(this)">ไม่เอา</button>
+        </div>
+    </article>
+`;
+
+const coachList = (suggestions) => {
+    const list = Array.isArray(suggestions) ? suggestions : [];
+    if (!list.length) return `<p class="py-4 text-center text-sm text-slate-500">ยังไม่มีข้อเสนอ โค้ชจะอ่านแชทของเมื่อวานให้วันละครั้ง</p>`;
+    return [ ...list ].reverse().map(coachItem).join("");
+};
+
+const coachCard = (state) => /*html*/`
+    <section class="${CARD} space-y-3 p-4 sm:p-5">
+        <header class="flex items-end gap-3">
+            <div class="min-w-0 flex-1">
+                <p class="${EYEBROW}">โค้ชตรวจแชท</p>
+                <h2 class="text-base font-semibold text-white">ตรงไหนที่เธอยังไม่เหมือนคน</h2>
+                <p class="text-xs text-slate-400">กด "สอนแบบนี้" แล้วจะกลายเป็นสิ่งที่สอน ไม่กดก็ไม่มีอะไรเปลี่ยน</p>
+            </div>
+            <button type="button" class="${BTN_GHOST}" onclick="reviewCoach()" data-coach-review>ตรวจตอนนี้</button>
+        </header>
+        <p class="text-xs text-slate-400" data-coach-msg role="status"></p>
+        <div class="scroll-slim max-h-[28rem] space-y-2 overflow-y-auto pr-1" data-coach-list>${coachList(state?.coach)}</div>
     </section>
 `;
 
@@ -280,6 +319,7 @@ const teachPanel = (state) => /*html*/`
             </div>
             ${lessons(state)}
         </div>
+        ${coachCard(state)}
         ${fileEditor(state)}
         <div class="grid gap-3 lg:grid-cols-2">
             ${snapshotsCard(state)}
@@ -289,4 +329,4 @@ const teachPanel = (state) => /*html*/`
     </section>
 `;
 
-export { teachPanel, lessonList, snapshotList, configFields, FILES };
+export { teachPanel, lessonList, snapshotList, configFields, coachList, FILES };

@@ -2,7 +2,9 @@ import { loadState } from "./mood.js";
 import { planReply } from "./pacing.js";
 import { loadSettings, saveSettings, currentId, pinProfile, getActiveId, listProfiles } from "./profiles.js";
 import { getConfig } from "./config.js";
-import { maybeRefresh } from "./world.js";
+import { maybeRefresh, dayKind } from "./world.js";
+import { maybeReview } from "./coach.js";
+import { complete } from "./brain.js";
 
 /* ------------------------------------ config */
 
@@ -118,6 +120,7 @@ export function startAwayScheduler(send, deps) {
         try {
             // Her morning look-up runs in the background (still pinned to her), even while you chat
             maybeRefresh();
+            maybeReview(complete);
             if (isOnScreen && isChatOpen()) return;
             if (deps && (await answerWhileClosed(deps))) return;
             const { awayPingHours: AWAY_HOURS, awayPerDay: MAX_PER_DAY } = await getConfig();
@@ -140,6 +143,8 @@ export function startAwayScheduler(send, deps) {
             if (Date.now() - Number(log.lastAt ?? 0) < AWAY_HOURS * 3600000) return;
 
             if ((await planReply({ texts: [] })).isAsleep) return;
+            // Out all day or swamped: she isn't the one who texts first today
+            if ([ "busy", "away" ].includes(await dayKind())) return;
 
             const result = await send(quietHours);
             if (!result?.bubbles?.length) return;

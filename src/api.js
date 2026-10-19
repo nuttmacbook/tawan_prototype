@@ -74,4 +74,7 @@ export const api = {
     readFile: (name) => call(`/api/file?name=${encodeURIComponent(name)}`),
     writeFile: (name, text) => call("/api/file", { name, text }),
     refreshToday: () => call("/api/today/refresh", {}),
+    coach: () => call("/api/coach"),
+    coachReview: () => call("/api/coach/review", {}),
+    coachDecide: (id, accept) => call("/api/coach/decide", { id, accept }),
 };

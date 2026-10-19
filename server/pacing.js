@@ -1,7 +1,7 @@
 import { loadState } from "./mood.js";
 import { loadTexts } from "./store.js";
 import { currentId } from "./profiles.js";
-import { todayActivities } from "./world.js";
+import { todayActivities, dayKind } from "./world.js";
 
 /* ------------------------------------ config */
 
@@ -188,6 +188,17 @@ export async function planReply({ texts = [], lastAgentAt = 0, lastReadAt = 0, n
         typingCps *= 0.75;
         readMs *= 1.3;
         reasons.push(isJustWoke ? "เพิ่งตื่น" : `เหนื่อย ${tired}`);
+    }
+
+    // A busy, away or sick day (picked by the morning look-up) slows her down all day
+    const kind = await dayKind().catch(() => "normal");
+    if (kind === "busy" || kind === "away") {
+        readMs *= 2.5;
+        reasons.push(kind === "away" ? "วันนี้ไม่อยู่บ้าน" : "วันนี้ยุ่งทั้งวัน");
+    } else if (kind === "sick") {
+        readMs *= 1.5;
+        typingCps *= 0.8;
+        reasons.push("วันนี้ไม่สบาย");
     }
 
     // Close friends get answered sooner

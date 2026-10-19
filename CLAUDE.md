@@ -57,6 +57,12 @@
 | เรื่องค้าง / ไดอารี่ / คนรอบตัว (people.md) | `server/life.js` | `notePerson()`, `peopleFor()` |
 | วันนี้ของเธอ: ค้นเน็ตตอนเช้า (อากาศ ซีรี่ ข่าว แผนของวัน เรื่องยาว), เมือง | `server/world.js` (test: `test/world.test.js`) | `maybeRefresh()` (เรียกจาก `away.js` ทุกนาที), `RESEARCH_SYSTEM`, `cleanFound()`, `renderToday()` · route `/api/today/refresh` |
 | ลิงก์ที่เธอส่งได้ (ตัดลิงก์ที่แต่งเอง), เปิดลิงก์ที่ผู้ใช้ส่ง | `server/world.js` + `server/brain.js` | `checkShared()`, `checkReply()`, `turn()` (`web.fetch`, `turnOpenedLinks` กันหน้าเว็บสั่งสอนนิสัย) · ฝั่งหน้าเว็บ `withLinks()` ใน `src/components/chat.js` |
+| จังหวะของแต่ละรอบ: ไม่ถามซ้ำ, ตอบสั้นตามผู้ใช้, ไม่ปิดด้วยคำถามทุกรอบ, ไม่ลาซ้ำ | `server/humanize.js` + `server/brain.js` | `rhythmFor()`, `isQuestion()`, `capBubbles()` · `<this_turn>` ใน `nowPrompt` |
+| โค้ชตรวจแชทรายวัน (ข้อเสนอรอผู้ใช้กดรับ) | `server/coach.js` + การ์ดใน `src/components/teach.js` | `COACH_SYSTEM`, `maybeReview()` (เรียกจาก `away.js`), `decide()` · routes `/api/coach*` · ห้ามให้ข้อเสนอเปลี่ยนอะไรเองโดยไม่ผ่านการกดรับ |
+| วันสำคัญ (dates.md), วันครบรอบที่คุยกัน | `server/life.js` | `noteDate()`, `upcomingDays()`, `firstChatDay()` · tool `remember_date` · `<special_days>` |
+| วันไม่ปกติ (ยุ่ง/ไม่อยู่/ไม่สบาย), เป้าหมายระยะยาว, วันหยุด | `server/world.js` + `server/pacing.js` + `server/away.js` | `pickDayType()` (`ODD_DAY_CHANCE`), `DAY_KINDS`, `dayKind()`, `todayActivities()` |
+| ทำอะไรด้วยกัน (ซีรี่ เพลง เกม) | `server/brain.js` | `<together>` ใน `stablePrompt` |
+| ห่วงการใช้งาน (คุยดึก คุยเยอะ) | `server/usage.js` + `server/brain.js` | `recordUse()`, `careNote()`, `CARE_EVERY_MS` · เก็บแค่จำนวน ห้ามเก็บเนื้อหา |
 | จำเลือนเรื่องเล็กที่เก่า | `server/recall.js` | `selectMemory({ fadeDays })`, `KEEP_TOPICS` |
 | อ่าน/เขียนไฟล์ .md | `server/store.js` | |
 | เรียก Claude ในเครื่อง / API | `server/llm.js` | |
