@@ -6,7 +6,13 @@ import { todayActivities, dayKind } from "./world.js";
 /* ------------------------------------ config */
 
 // Every timing rule lives here so it can be tuned (also from editlogic mode)
+// The activity name for a message she read and simply forgot to answer (brain.js words her apology)
+export const FORGOT = "อ่านแล้วลืมตอบ";
+const SERIOUS = /เศร้า|ร้องไห้|ไม่ไหว|อยากตาย|ไม่อยากอยู่|ทำร้ายตัวเอง|เครียดมาก|ป่วย|โรงพยาบาล|ด่วน|ช่วยด้วย/;
+
 const PACING = {
+    forgetChance: 0.04,       // now and then she reads, means to answer, and forgets for a while
+    forgetMinutes: [ 20, 60 ],
     readCps: 18,              // how fast she reads the user's messages (characters per second)
     typingCps: 6,             // default typing speed, overridden by "ความเร็วพิมพ์" in persona.md
     inChatWindowMs: 120000,   // replied or read within this window = still holding the phone
@@ -192,7 +198,10 @@ export async function planReply({ texts = [], lastAgentAt = 0, lastReadAt = 0, n
 
     // A busy, away or sick day (picked by the morning look-up) slows her down all day
     const kind = await dayKind().catch(() => "normal");
-    if (kind === "busy" || kind === "away") {
+    if (kind === "moody") {
+        readMs *= 1.3;
+        reasons.push("วันนี้อารมณ์ไม่ค่อยดี");
+    } else if (kind === "busy" || kind === "away") {
         readMs *= 2.5;
         reasons.push(kind === "away" ? "วันนี้ไม่อยู่บ้าน" : "วันนี้ยุ่งทั้งวัน");
     } else if (kind === "sick") {
@@ -208,7 +217,12 @@ export async function planReply({ texts = [], lastAgentAt = 0, lastReadAt = 0, n
     readMs = clamp(jitter(readMs), 500, PACING.maxReadMs);
 
     // Greeting and nudge plans (no texts) are her own choice to talk, so no activity applies
-    const busy = texts.length ? activityAt(now, { hour, isInChat, isAsleep, lonely, activities: await planned(persona) }) : null;
+    let busy = texts.length ? activityAt(now, { hour, isInChat, isAsleep, lonely, activities: await planned(persona) }) : null;
+    // Not while you're talking back and forth, and never when you sound like you need her
+    if (!busy && texts.length && !isInChat && !isAsleep && !SERIOUS.test(texts.join(" ")) && Math.random() < PACING.forgetChance) {
+        busy = { name: FORGOT, until: now + between(PACING.forgetMinutes) * 60000, phoneAway: false };
+        doing.set(currentId(), busy);
+    }
     let laterMs = 0;
     if (busy?.phoneAway) {
         readMs = Math.max(readMs, busy.until - now + between([ 1000, 6000 ]));

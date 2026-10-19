@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { activeDir, currentId, loadSettings } from "./profiles.js";
-import { FILES, safeRead, today } from "./store.js";
+import { FILES, safeRead, today, splitSections, sectionTitle } from "./store.js";
 import { withFileLock, writeAtomic } from "./fsutil.js";
 import { askClaudeCode, askApiWithWeb, webSearchTool } from "./llm.js";
 import { loadState, adjustMood } from "./mood.js";
@@ -25,6 +25,7 @@ const DAY_KINDS = {
     busy: "ยุ่งทั้งวัน (งานด่วน ลูกค้าเร่ง ถ่ายงานทั้งวัน) ตอบช้าและสั้นกว่าปกติ",
     away: "ไม่อยู่บ้าน ไปต่างจังหวัดหรือไปธุระไกลทั้งวัน เน็ตไม่ค่อยดี ตอบห่าง ๆ",
     sick: "ไม่ค่อยสบายเล็กน้อย (เป็นหวัด ปวดหัว ไม่ร้ายแรง) พักผ่อนอยู่บ้าน ตอบช้าและอ้อนนิด ๆ",
+    moody: "อารมณ์ไม่ค่อยดีจากเรื่องของตัวเอง (งานพลาด เรื่องที่บ้าน เหนื่อยสะสม) ตอบห้วนกว่าปกติแต่ไม่ลงที่ผู้ใช้ ถ้าถามก็เล่า",
 };
 
 const lifeFile = () => path.join(activeDir(), "life.json");
@@ -57,7 +58,7 @@ export async function todayInfo() {
 
 const daysBefore = (n) => new Date(Date.now() - n * 86400000).toLocaleDateString("sv-SE");
 
-/** "normal" | "busy" | "away" | "sick": what kind of day she's having */
+/** "normal" | "busy" | "away" | "sick" | "moody": what kind of day she's having */
 export const dayKind = async () => (await todayInfo().catch(() => null))?.dayType ?? "normal";
 
 /**
@@ -69,7 +70,7 @@ export function pickDayType(life, rand = Math.random, yesterday = daysBefore(1))
     if (last && last.dayType !== "normal") return "normal";
     if (rand() >= ODD_DAY_CHANCE) return "normal";
     const r = rand();
-    return r < 0.6 ? "busy" : r < 0.9 ? "away" : "sick";
+    return r < 0.45 ? "busy" : r < 0.7 ? "away" : r < 0.8 ? "sick" : "moody";
 }
 
 /** Her plan for today as activities for pacing.js ("busy" = chance she's caught up in it) */
@@ -196,7 +197,7 @@ const RESEARCH_SYSTEM = `คุณช่วยเตรียม "วันน�
   "interests": [{ "about": "ศิลปิน/เพลง/เรื่องที่เธอชอบ", "note": "มีอะไรใหม่", "url": "https://..." }],
   "links": [{ "title": "สิ่งที่เธออาจส่งให้เพื่อน เช่น เพลงใหม่ คลิป", "url": "https://...", "why": "ทำไมอยากส่ง" }],
   "plan": [{ "from": 10, "to": 12, "doing": "ทำคอนเทนต์อยู่", "phoneAway": false, "busy": 0.3 }],
-  "stories": [{ "title": "เรื่องยาวในชีวิตเธอ", "today": "วันนี้เรื่องนี้เป็นยังไง", "status": "ongoing" }],
+  "stories": [{ "title": "เรื่องยาวในชีวิตเธอ", "today": "วันนี้เรื่องนี้เป็นยังไง", "status": "ongoing", "askFriend": "คำถามที่เธออยากขอความเห็นเพื่อน (ไม่มีก็เว้นว่าง)" }],
   "dayReason": "ทำไมวันนี้ไม่ปกติ สั้น ๆ (วันปกติเว้นว่าง)",
   "goals": [{ "title": "เป้าหมายระยะยาว", "progress": 35, "note": "วันนี้คืบหน้าหรือติดอะไร", "status": "ongoing" }],
   "mood": { "เหนื่อย": 1 },
@@ -204,7 +205,16 @@ const RESEARCH_SYSTEM = `คุณช่วยเตรียม "วันน�
 }
 plan: ช่วงเวลาเป็นชั่วโมง 0-24, phoneAway = ไม่เห็นมือถือ, busy 0-1 = โอกาสที่จะติดธุระตอนมีข้อความเข้า
 stories: 1-3 เรื่อง เดินต่อจากเมื่อวาน จบได้ (status "ended") แล้วเริ่มเรื่องใหม่ได้
+  บางเรื่องมีทางเลือกที่เธอตัดสินใจไม่ถูก ใส่ askFriend (ไม่เกิน 1 เรื่องต่อวัน) ถ้าผู้ใช้เคยให้คำแนะนำไว้ (ใน <คำแนะนำจากผู้ใช้>) ให้เรื่องเดินตามที่เธอเลือกทำ และผลออกมาดีบ้างไม่ดีบ้างตามจริง
+  ถ้าวันนี้เป็นวันอารมณ์ไม่ดี ให้ mood สะท้อน เช่น { "หงุดหงิด": 2 } หรือ { "เศร้า": 1 }
 mood: ค่าเปลี่ยนจากชีวิตเธอเอง ครั้งละไม่เกิน ±2 ใส่เฉพาะเมื่อมีเหตุ`;
+
+/** The advice you gave her lately (memory topic "คำแนะนำจากผู้ใช้"), so her stories follow what she chose */
+async function adviceGiven() {
+    const doc = splitSections(await safeRead(FILES.memory));
+    const section = doc.sections.find((s) => sectionTitle(s) === "คำแนะนำจากผู้ใช้");
+    return section ? section.split("\n").filter((l) => l.startsWith("- ")).slice(-5).join("\n") : "";
+}
 
 async function research({ persona, life, dayType = "normal" }) {
     const city = cityOf(persona) || life.city || "";
@@ -232,6 +242,10 @@ async function research({ persona, life, dayType = "normal" }) {
         "<เป้าหมายระยะยาว ล่าสุด>",
         JSON.stringify(life.goals ?? []),
         "</เป้าหมายระยะยาว>",
+        "",
+        "<คำแนะนำจากผู้ใช้>",
+        (await adviceGiven()) || "(ยังไม่มี)",
+        "</คำแนะนำจากผู้ใช้>",
         "",
         "<ซีรี่ที่ดูอยู่เมื่อวาน (ดูต่อเรื่องเดิมได้ถ้ายังไม่จบ)>",
         JSON.stringify((life.today?.shows ?? []).map((s) => s.title)),
@@ -299,7 +313,7 @@ export function cleanFound(raw) {
         interests: list(raw.interests, 6).map((s) => ({ about: line(s?.about, 60), note: line(s?.note, 160), url: url(s?.url) })).filter((s) => s.about),
         links: list(raw.links, 6).map((l) => ({ title: line(l?.title, 100), url: url(l?.url), why: line(l?.why, 120) })).filter((l) => l.url),
         plan,
-        stories: list(raw.stories, 3).map((s) => ({ title: line(s?.title, 60), today: line(s?.today, 200), status: s?.status === "ended" ? "ended" : "ongoing" })).filter((s) => s.title),
+        stories: list(raw.stories, 3).map((s) => ({ title: line(s?.title, 60), today: line(s?.today, 200), status: s?.status === "ended" ? "ended" : "ongoing", askFriend: line(s?.askFriend, 160) })).filter((s) => s.title),
         mood,
         dayReason: line(raw.dayReason, 120),
         goals: list(raw.goals, 2).map((g) => ({
@@ -331,7 +345,7 @@ export function renderToday(info, name = "เธอ") {
         section("วันหยุด / เทศกาล", (info.holidays ?? []).map((n) => `- ${n}`)),
         section("ลิงก์ที่ส่งให้คนอื่นได้", info.links.map((l) => `- ${l.title}${l.why ? ` (${l.why})` : ""} · ${l.url}`)),
         section("เป้าหมายของเธอ", (info.goals ?? []).map((g) => `- ${g.title} — ${g.status === "done" ? "สำเร็จแล้ว!" : `${g.progress}%`}${g.note ? ` · ${g.note}` : ""}`)),
-        section("เรื่องยาวในชีวิต", info.stories.map((s) => `- ${s.title}: ${s.today}${s.status === "ended" ? " (จบแล้ว)" : ""}`)),
+        section("เรื่องยาวในชีวิต", info.stories.map((s) => `- ${s.title}: ${s.today}${s.status === "ended" ? " (จบแล้ว)" : ""}${s.askFriend ? ` · อยากถามความเห็นผู้ใช้: ${s.askFriend}` : ""}`)),
     ].filter(Boolean).join("\n").trim() + "\n";
 }
 

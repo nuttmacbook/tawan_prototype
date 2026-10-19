@@ -393,7 +393,7 @@ export async function addStyleSamples(raw, { speaker = "" } = {}) {
 
 /* ------------------------------------ editable files */
 
-const EDITABLE = [ "persona", "style", "teachings", "memory", "state", "threads", "diary", "journal", "people", "today", "dates" ];
+const EDITABLE = [ "persona", "style", "teachings", "memory", "state", "threads", "diary", "journal", "people", "today", "dates", "opinions" ];
 
 /** Only the known md files can be read or written from the web page */
 export async function readEditable(name) {

@@ -264,3 +264,62 @@ export async function firstChatDay() {
 }
 
 export const datesNote = async () => upcomingDays(await safeRead(FILES.dates), { firstChat: await firstChatDay() });
+
+/* ------------------------------------ her opinions (opinions.md) */
+
+const OPINIONS_HEAD = [
+    "# ความเห็นของเธอ",
+    "",
+    "> สิ่งที่ตัวละครเคยบอกว่าชอบ ไม่ชอบ หรือคิดยังไง ระบบจดเองเพื่อไม่ให้พูดขัดกับตัวเอง แก้เองได้",
+    "",
+].join("\n");
+const MAX_VIEWS = 3;
+const OPINIONS_BUDGET = 1500;
+
+/**
+ * What she thinks about something, so she doesn't love durian on Monday and hate it on Tuesday.
+ * Saying the same thing again changes nothing; a new view is added under the old one (she changed her mind).
+ */
+export async function noteOpinion({ about, opinion } = {}) {
+    const topic = oneLine(about, 40);
+    const view = oneLine(opinion);
+    if (!topic || !view) return "ต้องบอกเรื่องและความเห็น";
+    let outcome = "new";
+    await updateText(FILES.opinions, (text) => {
+        const doc = splitSections(text || OPINIONS_HEAD);
+        const index = doc.sections.findIndex((s) => sectionTitle(s) === topic);
+        if (index < 0) {
+            doc.sections.push(`## ${topic}\n- [${today()}] ${view}`);
+            return joinSections(doc);
+        }
+        const [ heading, ...lines ] = doc.sections[index].split("\n").filter((l) => l.trim());
+        const latest = lines.at(-1)?.replace(/^- \[\d{4}-\d{2}-\d{2}\]\s*/, "") ?? "";
+        if (latest === view) {
+            outcome = "same";
+            return null;
+        }
+        outcome = "changed";
+        doc.sections[index] = [ heading, ...[ ...lines, `- [${today()}] ${view}` ].slice(-MAX_VIEWS) ].join("\n");
+        return joinSections(doc);
+    });
+    return outcome === "same" ? `ความเห็นเดิม: ${topic}` : outcome === "changed" ? `เปลี่ยนความเห็น: ${topic}` : `จดความเห็น: ${topic}`;
+}
+
+/** Her views that matter now: ones the chat mentions first, then the newest */
+export async function opinionsFor(query) {
+    const doc = splitSections(await safeRead(FILES.opinions));
+    if (!doc.sections.length) return "";
+    const q = String(query ?? "");
+    const latest = (s) => (s.match(/\[(\d{4}-\d{2}-\d{2})\]/g) ?? []).sort().at(-1) ?? "";
+    const ranked = doc.sections
+        .map((s) => ({ s: s.trimEnd(), hit: q.includes(sectionTitle(s)), at: latest(s) }))
+        .sort((a, b) => Number(b.hit) - Number(a.hit) || b.at.localeCompare(a.at));
+    const chosen = [];
+    let used = 0;
+    for (const r of ranked) {
+        if (used + r.s.length > OPINIONS_BUDGET) continue;
+        chosen.push(r.s);
+        used += r.s.length;
+    }
+    return chosen.join("\n\n");
+}

@@ -15,7 +15,7 @@ const CORE_SHARE = 0.45;
 /* ------------------------------------ memory */
 
 // Never fade: who you are, what she calls you, what you asked her to remember, your inside jokes
-const KEEP_TOPICS = /เกี่ยวกับผู้ใช้|ชื่อเรียก|สิ่งที่ผู้ใช้ขอให้จำ|มุกภายใน/;
+const KEEP_TOPICS = /เกี่ยวกับผู้ใช้|ชื่อเรียก|สิ่งที่ผู้ใช้ขอให้จำ|มุกภายใน|คำแนะนำจากผู้ใช้|ดูด้วยกัน/;
 const dayOf = (line) => line.match(/^- \[(\d{4}-\d{2}-\d{2})\]/)?.[1] ?? "";
 
 /**
@@ -114,3 +114,29 @@ export function selectTeachings(teachings, query, budget = TEACHINGS_BUDGET) {
 }
 
 export { MEMORY_BUDGET, TEACHINGS_BUDGET };
+
+/* ------------------------------------ bringing up the past */
+
+/**
+ * One older thing she might bring up by herself ("จำได้ป่ะ ที่พี่เคยบอกว่า…"): a dated fact from
+ * a few days to a few months ago. Names and nicknames aren't news, so they're left out.
+ * @returns {string} "หัวข้อ: fact (date)" or ""
+ */
+export function pickCallback(memory, { now = Date.now(), rand = Math.random } = {}) {
+    const doc = splitSections(String(memory ?? ""));
+    const from = new Date(now - 180 * 86400000).toLocaleDateString("sv-SE");
+    const to = new Date(now - 4 * 86400000).toLocaleDateString("sv-SE");
+    const items = [];
+    for (const section of doc.sections) {
+        const topic = sectionTitle(section);
+        if (/ชื่อเรียก/.test(topic)) continue;
+        for (const line of section.split("\n").slice(1)) {
+            const day = dayOf(line);
+            if (day && day >= from && day <= to) items.push({ topic, line, day, weight: /มุกภายใน/.test(topic) ? 2 : 1 });
+        }
+    }
+    if (!items.length) return "";
+    const pool = items.flatMap((x) => Array(x.weight).fill(x));
+    const pick = pool[Math.floor(rand() * pool.length)];
+    return `${pick.topic}: ${pick.line.replace(/^- \[\d{4}-\d{2}-\d{2}\]\s*/, "")} (${pick.day})`;
+}

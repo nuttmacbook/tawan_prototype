@@ -22,7 +22,7 @@ const TEMPLATE_DIR = fileURLToPath(new URL("./templates/", import.meta.url));
 const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
 const SETTINGS_BACKUP = path.join(DATA_DIR, "settings.json.bak");
 
-const MD_FILES = [ "persona", "style", "teachings", "memory", "state", "threads", "diary", "journal", "people", "today", "dates" ];
+const MD_FILES = [ "persona", "style", "teachings", "memory", "state", "threads", "diary", "journal", "people", "today", "dates", "opinions" ];
 // What a copied character keeps; everything about the relationship starts fresh
 const IDENTITY_FILES = [ "persona", "style", "teachings" ];
 const KEEP_SNAPSHOTS = 30;

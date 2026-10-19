@@ -42,6 +42,7 @@ export const api = {
     restart: (backupId) => call("/api/restart", { backupId }),
     greet: () => call("/api/greet", {}),
     nudge: (minutes) => call("/api/nudge", { minutes }),
+    afterthought: () => call("/api/afterthought", {}),
     reset: () => call("/api/reset", {}),
     teachings: () => call("/api/teachings"),
     teach: (lesson) => call("/api/teach", lesson),

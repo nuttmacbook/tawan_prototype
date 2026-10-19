@@ -14,7 +14,7 @@ process.on("unhandledRejection", (err) => console.error("unhandled:", err?.stack
 
 const {
     chat, greet, nudge, warmUp, resetSession, personaName, brainMode, consolidateHistory, compactMemory, hasApiKey, presence,
-    addReaction, awayPing, switchExclusive, forgetSession, noteUnsent, promptStats, cutLastReply, complete,
+    addReaction, awayPing, switchExclusive, forgetSession, noteUnsent, promptStats, cutLastReply, complete, afterthought,
 } = await import("./brain.js");
 const profiles = await import("./profiles.js");
 const away = await import("./away.js");
@@ -490,6 +490,8 @@ const routes = {
         return { ...(await greet()), status: await statusPayload() };
     },
 
+    // "เห้ย ลืมบอก": the page asks when the time the server picked has come; empty if it passed
+    "POST /api/afterthought": async () => ({ ...(await afterthought()), status: await statusPayload() }),
     "POST /api/nudge": async (body) => ({ ...(await nudge(Number(body?.minutes ?? 15))), status: await statusPayload() }),
 
     "POST /api/reset": async () => {

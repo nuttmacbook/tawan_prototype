@@ -214,3 +214,51 @@ test("rethink (when turned on) drops a reply only once in a row", async () => {
     assert.deepEqual(calls.cut, [ { n: 0, bubbles: [ "เก่า" ] } ]);
     assert.deepEqual(bubbles(), [ "ใหม่" ]);
 });
+
+test("afterthought: a few minutes after her reply she adds something, unless you wrote first", async () => {
+    // Built by hand: the shared setup's api has no afterthought, so add one here
+    const clock = fakeClock();
+    const shown = [];
+    let asked = 0;
+    const make = () => createEngine({
+        api: {
+            pacing: async () => PLAN,
+            read: async () => {},
+            cut: async () => {},
+            greet: async () => ({ bubbles: [] }),
+            nudge: async () => ({ bubbles: [] }),
+            chat: async () => ({ bubbles: [ "โอเค" ], afterthoughtInMs: 5 * 60000 }),
+            afterthought: async () => {
+                asked++;
+                return { bubbles: [ "เห้ย ลืมบอก" ] };
+            },
+        },
+        ui: {
+            append: () => {}, setTyping: () => {}, setPresence: () => {}, setReceipts: () => {}, showReaction: () => {},
+            markFailed: () => {}, markSeen: () => {}, notify: () => {}, isReducedMotion: () => false, renderStatus: () => {},
+            showBubble: (text) => {
+                shown.push(text);
+                return `b${shown.length}`;
+            },
+            unsendBubble: () => {},
+        },
+        timers: clock.timers,
+        settings: () => ({ clientId: "c1", idleMinutes: 0, rethinkOnInterrupt: false, showNotes: false }),
+    });
+
+    const quiet = make();
+    quiet.add({ id: "a", text: "หวัดดี" });
+    await clock.run(6 * 60000);
+    assert.equal(asked, 1);
+    assert.deepEqual(shown.slice(-1), [ "เห้ย ลืมบอก" ]);
+
+    const busy = make();
+    busy.add({ id: "b", text: "หวัดดี" });
+    await clock.run(60000);
+    busy.add({ id: "c", text: "ว่าไง" });
+    await clock.run(60000);
+    const before = asked;
+    // The second reply plans its own afterthought; only that one may fire
+    await clock.run(10 * 60000);
+    assert.equal(asked - before, 1);
+});

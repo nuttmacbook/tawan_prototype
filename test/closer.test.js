@@ -145,3 +145,43 @@ test("usage: a third late night in five gets a caring note, a heavy day another"
     assert.equal(careNote(usage, new Date("2026-10-19T15:00:00")), "");
     assert.match(careNote({ "2026-10-19": { messages: 250, late: 0 } }, new Date("2026-10-19T15:00:00")), /250 ข้อความ/);
 });
+
+/* ------------------------------------ her own mind, and knowing you */
+
+const { noteOpinion, opinionsFor } = await import("../server/life.js");
+const { routineNote } = await import("../server/usage.js");
+const { pickCallback } = await import("../server/recall.js");
+
+test("opinions: the same view is kept once, a new one is a change of mind", async () => {
+    assert.match(await noteOpinion({ about: "ทุเรียน", opinion: "ไม่ชอบเลย กลิ่นแรง" }), /จดความเห็น/);
+    assert.match(await noteOpinion({ about: "ทุเรียน", opinion: "ไม่ชอบเลย กลิ่นแรง" }), /ความเห็นเดิม/);
+    assert.match(await noteOpinion({ about: "ทุเรียน", opinion: "ลองหมอนทองแล้ว ก็โอเคนะ" }), /เปลี่ยนความเห็น/);
+    const text = await opinionsFor("กินทุเรียนป่ะ");
+    assert.match(text, /^## ทุเรียน/);
+    assert.match(text.split("\n").at(-1), /หมอนทอง/);
+});
+
+test("routine: a week of evenings becomes 'usually around 20:00', and an early day is noticed", () => {
+    const usage = {};
+    // Weekdays 2026-10-05..09 and 12..16, always around 20:00–22:00
+    for (const d of [ "05", "06", "07", "08", "09", "12", "13", "14", "15", "16" ]) {
+        const hours = Array(24).fill(0);
+        hours[20] = 10;
+        hours[21] = 8;
+        usage[`2026-10-${d}`] = { messages: 18, late: 0, hours, first: 20 * 60 + 5 };
+    }
+    const hours = Array(24).fill(0);
+    hours[7] = 2;
+    usage["2026-10-19"] = { messages: 2, late: 0, hours, first: 7 * 60 + 10 };
+    const note = routineNote(usage, new Date("2026-10-19T07:15:00"));
+    assert.match(note, /วันธรรมดา: มักทักครั้งแรกราว 20:00 น\. คุยกันเยอะช่วง 20–23 น\./);
+    assert.match(note, /วันนี้ทักครั้งแรก 07:15 น\. เร็วกว่าปกติ/);
+    assert.equal(routineNote({ "2026-10-18": usage["2026-10-16"] }, new Date("2026-10-19T07:15:00")), "");
+});
+
+test("pickCallback: an older dated memory, never a nickname or something from today", () => {
+    const memory = "## ชื่อเรียก\n- [2026-09-01] เรียกผู้ใช้ว่าพี่\n\n## งาน\n- [2026-09-20] หัวหน้าให้ทำ OT ทุกวัน\n- [2026-10-18] วันนี้เหนื่อย";
+    const pick = pickCallback(memory, { now: new Date("2026-10-19T12:00:00").getTime(), rand: () => 0 });
+    assert.equal(pick, "งาน: หัวหน้าให้ทำ OT ทุกวัน (2026-09-20)");
+    assert.equal(pickCallback("## ชื่อเรียก\n- [2026-09-01] พี่", { now: new Date("2026-10-19").getTime() }), "");
+});

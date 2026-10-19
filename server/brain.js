@@ -7,13 +7,14 @@ import {
 } from "./store.js";
 import { loadState, passTime, markUserMessage, gapSinceUser, adjustMood, describeMood, stageOf, humanGap, agoText, timeOfDay } from "./mood.js";
 import { currentId, getActiveId } from "./profiles.js";
-import { loadThreads, addThread, closeThread, writeDiary, loadDiary, notePerson, peopleFor, noteDate, datesNote } from "./life.js";
+import { loadThreads, addThread, closeThread, writeDiary, loadDiary, notePerson, peopleFor, noteDate, datesNote, noteOpinion, opinionsFor } from "./life.js";
 import { askApi, askClaudeCode, hasApiKey, usageOf, claudeCodeUsage, WEB_FETCH_TOOL } from "./llm.js";
 import { todayInfo, knownLinks, checkShared, linksIn } from "./world.js";
 import { humanizeReply, userStyleNote, repetitionNote, rhythmFor, capBubbles } from "./humanize.js";
-import { selectMemory, selectTeachings } from "./recall.js";
+import { selectMemory, selectTeachings, pickCallback } from "./recall.js";
+import { FORGOT } from "./pacing.js";
 import { getConfig } from "./config.js";
-import { recordUse, loadUsage, careNote } from "./usage.js";
+import { recordUse, loadUsage, careNote, routineNote } from "./usage.js";
 
 /* ------------------------------------ one mind per character */
 
@@ -38,6 +39,8 @@ const newSession = () => ({
     lastUsage: null,
     rhythm: null,
     lastCareAt: 0,
+    // "เห้ย ลืมบอก": when she'll think of something after the chat goes quiet (0 = nothing planned)
+    afterthoughtAt: 0,
 });
 
 /** The session of the character this work is pinned to (see profiles.pinProfile) */
@@ -72,6 +75,9 @@ const MAX_TOOL_ROUNDS = 6;
 const MAX_BUBBLES = 4;
 const GREET_COOLDOWN_MS = 10 * 60000;
 const CARE_EVERY_MS = 3 * 3600000;
+const AFTERTHOUGHT_CHANCE = 0.15;
+const AFTERTHOUGHT_MINUTES = [ 4, 20 ];
+const CALLBACK_CHANCE = { chat: 0.08, opener: 0.35 };
 const SILENT = "<เงียบ>";
 
 /* ------------------------------------ brain mode */
@@ -180,11 +186,12 @@ const HANDLERS = {
     write_diary: (i) => writeDiary(i?.entry),
     note_person: (i) => notePerson(i ?? {}),
     remember_date: (i) => noteDate(i ?? {}),
+    note_opinion: (i) => noteOpinion(i ?? {}),
 };
 
 // Actions that write into files every later prompt reads. On a turn that opened a web page,
 // hidden text on that page could otherwise plant fake memories, people or lessons for good.
-const KEPT_FOR_GOOD = new Set([ "remember", "learn_reaction", "note_person", "remember_date", "add_thread", "close_thread", "write_diary" ]);
+const KEPT_FOR_GOOD = new Set([ "remember", "learn_reaction", "note_person", "remember_date", "note_opinion", "add_thread", "close_thread", "write_diary" ]);
 
 /** Runs one action and turns any failure into a note instead of breaking the reply */
 async function runAction(name, input) {
@@ -298,6 +305,18 @@ const TOOLS = [
             required: [ "what", "date" ],
         },
     },
+    {
+        name: "note_opinion",
+        description: "จดความเห็นหรือรสนิยมของตัวละครเองที่เพิ่งพูดออกไป (ชอบ/ไม่ชอบ/คิดยังไงกับเรื่องนั้น) เพื่อครั้งหน้าพูดตรงกัน ถ้าเปลี่ยนใจก็จดความเห็นใหม่",
+        input_schema: {
+            type: "object",
+            properties: {
+                about: { type: "string", description: "เรื่อง สั้น ๆ เช่น ทุเรียน, ซีรี่ X ตอนจบ" },
+                opinion: { type: "string", description: "ความเห็นของตัวละคร ประโยคเดียว" },
+            },
+            required: [ "about", "opinion" ],
+        },
+    },
 ];
 
 /* ------------------------------------ prompt */
@@ -343,6 +362,7 @@ ${String(style ?? "").trim() || "(ยังไม่มี)"}
 - อยากแบ่งอะไรให้ผู้ใช้ดูแบบเพื่อน ส่งลิงก์ได้เฉพาะ URL ที่อยู่ใน <today> หรือที่ผู้ใช้ส่งมา คัดลอกตรงตัว ห้ามเดาลิงก์ ส่งบ้างไม่บ่อย
 - คนรอบตัวคุณใน <people> ใช้ชื่อเดิมเสมอ เล่าถึงคนใหม่หรือเรื่องใหม่ของคนเดิม → note_person
 - ถ้า <today> บอกว่าวันนี้ยุ่ง ไม่อยู่บ้าน หรือไม่สบาย ให้ตอบสั้นและห่างกว่าปกติ บอกเหตุผลเมื่อเข้าจังหวะ แล้ววันต่อมาเล่าว่าเป็นยังไงบ้าง
+- ถ้าเรื่องยาวใน <today> มี "อยากถามความเห็นผู้ใช้" ขอความเห็นเมื่อจังหวะเหมาะ (วันละครั้งพอ ไม่ใช่ตอนผู้ใช้กำลังเล่าเรื่องของตัวเอง) ฟังจริง และอาจไม่ทำตามก็ได้ถ้ามีเหตุผล
 - เป้าหมายของคุณใน <today> คือสิ่งที่ตั้งใจจริง เล่าความคืบหน้า ดีใจ หรือท้อได้บ้าง (ไม่ใช่ทุกครั้ง) และดีใจถ้าผู้ใช้ถามถึง
 </real_world>
 
@@ -362,6 +382,8 @@ ${String(style ?? "").trim() || "(ยังไม่มี)"}
 - ผู้ใช้เล่าแผนหรือเรื่องที่ยังไม่จบ → add_thread พร้อมวันที่ควรถาม
 - เรื่องค้างที่ "ถึงเวลาถามแล้ว" → ถามเมื่อจังหวะเหมาะ ทีละเรื่อง ได้คำตอบแล้ว close_thread
 - เล่าเรื่องของตัวเองที่ยังไม่มีในไดอารี่ → write_diary และเล่าให้ตรงกับไดอารี่เดิมเสมอ
+- คุณบอกความเห็นหรือรสนิยมของตัวเองที่ยังไม่มีใน <opinions> หรือเปลี่ยนใจ → note_opinion · พูดให้ตรงกับ <opinions> เสมอ เปลี่ยนใจได้เมื่อมีเหตุผลและบอกว่าเปลี่ยนใจ
+- ผู้ใช้ให้คำแนะนำเรื่องในชีวิตคุณ → remember หัวข้อ "คำแนะนำจากผู้ใช้" แล้ววันต่อ ๆ ไปเล่าว่าทำตามแล้วเป็นยังไง
 - ผู้ใช้บอกวันเกิดหรือวันสำคัญที่วนทุกปี → remember_date · วันใน <special_days> ที่เป็นวันนี้ ให้ทักหรืออวยพรแบบเพื่อน (ครั้งเดียวพอ ไม่ต้องพูดทุกข้อความ)
 </memory_rules>
 
@@ -446,7 +468,7 @@ ${threadLines.join("\n") || "(ไม่มีเรื่องค้าง)"}
 ${world?.today || "(วันนี้ยังไม่ได้ดูเน็ต: ห้ามแต่งชื่อซีรี่ เพลง หรือข่าวที่เจาะจง ถ้าถูกถามให้ตอบกว้าง ๆ หรือบอกว่าช่วงนี้ยังไม่ได้ดูอะไร)"}
 </today>
 
-${world?.days?.length ? `<special_days>\n${world.days.map((d) => `- ${d}`).join("\n")}\n</special_days>\n\n` : ""}<people>
+${world?.days?.length ? `<special_days>\n${world.days.map((d) => `- ${d}`).join("\n")}\n</special_days>\n\n` : ""}${world?.opinions ? `<opinions>\nความเห็นที่คุณเคยพูดไว้ (บรรทัดล่างสุดของแต่ละเรื่องคือตอนนี้)\n${world.opinions}\n</opinions>\n\n` : ""}${world?.routine ? `<user_routine>\nสิ่งที่คุณสังเกตเองจากเวลาที่ผู้ใช้ทักมา พูดถึงได้บ้างแบบเพื่อนที่สังเกต (ไม่บ่อย ไม่ต้องบอกตัวเลขเป๊ะ)\n${world.routine}\n</user_routine>\n\n` : ""}<people>
 คนในชีวิตคุณ
 ${world?.people || "(ยังไม่ได้จด ถ้าเล่าถึงใครให้ note_person)"}
 </people>
@@ -478,6 +500,7 @@ const JSON_REPLY_GUIDE = /*md*/`
   "write_diary": "...",
   "note_person": [{ "name": "...", "relation": "...", "trait": "...", "update": "..." }],
   "remember_date": [{ "what": "วันเกิดผู้ใช้", "date": "MM-DD" }],
+  "note_opinion": [{ "about": "...", "opinion": "..." }],
   "react": "❤️",
   "image_note": "คำบรรยายรูปที่ผู้ใช้ส่งสั้น ๆ (เฉพาะเมื่อมีรูป)"
 }
@@ -518,14 +541,16 @@ const TODAY_BUDGET = 3000;
 
 /** Her day from the morning look-up and the people in her life */
 async function worldFor(query) {
-    const [ info, people, days ] = await Promise.all([
+    const [ info, people, days, opinions, usage ] = await Promise.all([
         todayInfo().catch(() => null),
         peopleFor(query).catch(() => ""),
         datesNote().catch(() => []),
+        opinionsFor(query).catch(() => ""),
+        loadUsage().catch(() => ({})),
     ]);
     // today.md is only today's when the look-up ran today; yesterday's weather would be wrong
     const today = info ? (await safeRead(FILES.today)).replace(/^>.*$/gm, "").trim().slice(0, TODAY_BUDGET) : "";
-    return { today, people, days };
+    return { today, people, days, opinions, routine: routineNote(usage) };
 }
 
 async function contextFor(replyNote = "") {
@@ -698,6 +723,7 @@ async function claudeCodeTurn(notes, replyNote = "", images = [], web = {}) {
     }
     for (const item of asList(reply.note_person)) notes.push(await runAction("note_person", item));
     for (const item of asList(reply.remember_date)) notes.push(await runAction("remember_date", item));
+    for (const item of asList(reply.note_opinion)) notes.push(await runAction("note_opinion", item));
     if (typeof reply.react === "string" && reply.react.trim()) notes.push(await runAction("react", { emoji: reply.react }));
     if (typeof reply.image_note === "string" && reply.image_note.trim()) turnImageNote = reply.image_note.trim().slice(0, 200);
 
@@ -782,6 +808,9 @@ async function checkReply(bubbles, userLinks = [], notes = []) {
  */
 const replyNoteFor = ({ activity, readAgoMs, waitedMs }) => {
     const min = (ms) => Math.round(Number(ms ?? 0) / 60000);
+    if (activity === FORGOT) {
+        return `คุณอ่านข้อความนี้ไปตั้งแต่ ${Math.max(min(readAgoMs), min(waitedMs))} นาทีก่อนแล้วลืมตอบจริง ๆ เพิ่งเห็นว่ายังไม่ได้ตอบ ขอโทษสั้น ๆ แบบเพื่อน (เช่น "เห้ยยย ลืมตอบ 😭") แล้วตอบต่อ`;
+    }
     if (activity && min(readAgoMs) >= 2) {
         return `คุณอ่านข้อความนี้ไปตั้งแต่ ${min(readAgoMs)} นาทีก่อนแต่ยังไม่ได้ตอบ เพราะ${activity} ตอนนี้เพิ่งว่าง จะขอโทษหรือเล่าสั้น ๆ ว่าเมื่อกี้ทำอะไรก็ได้ถ้าเป็นธรรมชาติ`;
     }
@@ -820,7 +849,9 @@ export const chat = (texts, { activity = "", readAgoMs = 0, waitedMs = 0 } = {})
         const draftNote = takeDraftNote();
         // Looking out for you, at most every few hours, so it reads as care and not nagging
         const care = Date.now() - me.lastCareAt > CARE_EVERY_MS ? careNote(await loadUsage().catch(() => ({}))) : "";
-        const replyNote = [ replyNoteFor({ activity, readAgoMs, waitedMs }), draftNote.note, care ].filter(Boolean).join("\n");
+        // You wrote: whatever she was going to remember later is overtaken by the conversation
+        me.afterthoughtAt = 0;
+        const replyNote = [ replyNoteFor({ activity, readAgoMs, waitedMs }), draftNote.note, care, await callbackNote(CALLBACK_CHANCE.chat) ].filter(Boolean).join("\n");
         let result;
         try {
             result = await turn([ ...reactions, ...list ].join("\n"), replyNote);
@@ -849,6 +880,43 @@ export const chat = (texts, { activity = "", readAgoMs = 0, waitedMs = 0 } = {})
                 targetText: last.text,
             });
         }
+        me.lastReply = null;
+        if (result.bubbles.length) {
+            me.lastAgentAt = Date.now();
+            recordReply(result, await logTurn("agent", await personaName(), bubblesForLog(shownInLog(result.bubbles, result.unsend))));
+            // Sometimes something comes back to her a few minutes later; not after a goodbye
+            if (Math.random() < AFTERTHOUGHT_CHANCE && (me.rhythm?.maxBubbles ?? 2) > 1) {
+                const ms = (AFTERTHOUGHT_MINUTES[0] + Math.random() * (AFTERTHOUGHT_MINUTES[1] - AFTERTHOUGHT_MINUTES[0])) * 60000;
+                me.afterthoughtAt = Date.now() + ms;
+                result.afterthoughtInMs = Math.round(ms);
+            }
+        }
+        return result;
+    });
+
+/** An older memory she might bring up herself, now and then */
+async function callbackNote(chance) {
+    if (Math.random() >= chance) return "";
+    const pick = pickCallback(await readMemoryFile().catch(() => ""));
+    return pick ? `ถ้าเข้าจังหวะ (ไม่ต้องก็ได้) หยิบเรื่องเก่านี้มาพูดถึงแบบเพื่อนที่นึกขึ้นได้ เช่น ถามว่าตอนนี้เป็นยังไง หรือเล่นมุกเดิม: ${pick}` : "";
+}
+
+/** The afterthought she planned is due (checked by the scheduler while the chat is closed) */
+export const isAfterthoughtDue = () => me.afterthoughtAt > 0 && Date.now() >= me.afterthoughtAt;
+
+/**
+ * "เห้ย ลืมบอก…": a short message after the chat went quiet, about what you were talking about.
+ * Only once, and only if it's still due: whichever asks first (the open page or the scheduler) gets it.
+ */
+export const afterthought = () =>
+    withLock(async () => {
+        if (!(me.afterthoughtAt > 0) || Date.now() < me.afterthoughtAt - 30000) return { bubbles: [], notes: [] };
+        me.afterthoughtAt = 0;
+        await warm();
+        const minutes = Math.max(1, Math.round((Date.now() - me.lastAgentAt) / 60000));
+        const result = await turn(
+            `[ระบบ: คุยกันเงียบไปประมาณ ${minutes} นาที ถ้าคุณเพิ่งนึกอะไรได้เกี่ยวกับเรื่องที่เพิ่งคุยกัน หรือมีอะไรที่ลืมบอก ส่งสั้น ๆ 1–2 bubble แบบ "เห้ย ลืมบอก…" หรือ "เพิ่งนึกได้…" ถ้าไม่มีอะไรจริง ๆ ไม่ต้องส่ง]`,
+        );
         me.lastReply = null;
         if (result.bubbles.length) {
             me.lastAgentAt = Date.now();
@@ -884,6 +952,7 @@ export const awayPing = (hours) =>
         await warm();
         const result = await turn(
             `[ระบบ: ผู้ใช้ไม่ได้เปิดแชทมาประมาณ ${Math.round(hours)} ชั่วโมง ตอนนี้ไม่ได้อยู่ในแชท ถ้าตัวละครนึกถึงหรือมีเรื่องอยากเล่า ให้ส่งข้อความสั้น ๆ เหมือนทักหาเพื่อน (เล่าเรื่องในไดอารี่ ถามเรื่องค้าง หรือแค่ทักเล่น) ถ้าไม่มีเหตุให้ทักก็ไม่ต้องทัก]`,
+            await callbackNote(CALLBACK_CHANCE.opener),
         );
         me.lastReply = null;
         if (result.bubbles.length) {
@@ -939,9 +1008,12 @@ export const greet = () =>
         me.lastGap = gap;
         const note = gap == null
             ? "ผู้ใช้เปิดแอปครั้งแรก ยังไม่รู้จักกัน ทักและแนะนำตัวสั้น ๆ ตามบุคลิก"
-            : `ผู้ใช้เพิ่งเปิดหน้าแชท คุยกันครั้งล่าสุด ${agoText(gap)} ทักก่อนอย่างเป็นธรรมชาติตามเวลาและอารมณ์ ถ้ามีเรื่องค้างที่ถึงเวลาก็ถามได้`;
+            : `ผู้ใช้เพิ่งเปิดหน้าแชท คุยกันครั้งล่าสุด ${agoText(gap)} ทักก่อนอย่างเป็นธรรมชาติตามเวลาและอารมณ์ ถ้ามีเรื่องค้างที่ถึงเวลาก็ถามได้` +
+                // A new day: pick up where you left off, the way friends do
+                (gap > 6 * 3600000 ? " ดู <recent_history> ถ้าคราวก่อนคุยค้างไว้ (ผู้ใช้จะไปทำอะไร ยังไม่รู้ผล หรือเรื่องที่ยังไม่จบ) ทักต่อจากเรื่องนั้นได้ เช่น \"แล้วสรุปเมื่อวาน…\"" : "");
+        const callback = await callbackNote(CALLBACK_CHANCE.opener);
 
-        const result = await turn(`[ระบบ: ${note}]`);
+        const result = await turn(`[ระบบ: ${note}]`, callback);
         me.lastReply = null;
         if (result.bubbles.length) {
             me.lastAgentAt = Date.now();
@@ -957,8 +1029,11 @@ export const greet = () =>
 export const nudge = (minutes) =>
     withLock(async () => {
         await warm();
+        // She's talking now; a "ลืมบอก" right after would be one message too many
+        me.afterthoughtAt = 0;
         const result = await turn(
             `[ระบบ: ผู้ใช้เงียบไป ${Math.round(minutes)} นาที ถ้าตัวละครอยากทักก็ทักสั้น ๆ ตามอารมณ์และเวลา ถ้าไม่ควรทัก (เพิ่งบอกลา, ดึกมาก, ทักไปแล้วยังไม่ตอบ) ไม่ต้องทัก]`,
+            await callbackNote(CALLBACK_CHANCE.opener),
         );
         me.lastReply = null;
         if (result.bubbles.length) {

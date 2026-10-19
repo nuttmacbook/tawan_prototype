@@ -60,8 +60,14 @@
 | จังหวะของแต่ละรอบ: ไม่ถามซ้ำ, ตอบสั้นตามผู้ใช้, ไม่ปิดด้วยคำถามทุกรอบ, ไม่ลาซ้ำ | `server/humanize.js` + `server/brain.js` | `rhythmFor()`, `isQuestion()`, `capBubbles()` · `<this_turn>` ใน `nowPrompt` |
 | โค้ชตรวจแชทรายวัน (ข้อเสนอรอผู้ใช้กดรับ) | `server/coach.js` + การ์ดใน `src/components/teach.js` | `COACH_SYSTEM`, `maybeReview()` (เรียกจาก `away.js`), `decide()` · routes `/api/coach*` · ห้ามให้ข้อเสนอเปลี่ยนอะไรเองโดยไม่ผ่านการกดรับ |
 | วันสำคัญ (dates.md), วันครบรอบที่คุยกัน | `server/life.js` | `noteDate()`, `upcomingDays()`, `firstChatDay()` · tool `remember_date` · `<special_days>` |
-| วันไม่ปกติ (ยุ่ง/ไม่อยู่/ไม่สบาย), เป้าหมายระยะยาว, วันหยุด | `server/world.js` + `server/pacing.js` + `server/away.js` | `pickDayType()` (`ODD_DAY_CHANCE`), `DAY_KINDS`, `dayKind()`, `todayActivities()` |
+| วันไม่ปกติ (ยุ่ง/ไม่อยู่/ไม่สบาย/อารมณ์ไม่ดี), เป้าหมายระยะยาว, วันหยุด | `server/world.js` + `server/pacing.js` + `server/away.js` | `pickDayType()` (`ODD_DAY_CHANCE`), `DAY_KINDS`, `dayKind()`, `todayActivities()` |
 | ทำอะไรด้วยกัน (ซีรี่ เพลง เกม) | `server/brain.js` | `<together>` ใน `stablePrompt` |
+| นึกได้ทีหลัง ("เห้ย ลืมบอก") | `server/brain.js` + `src/engine.js` + `server/away.js` | `AFTERTHOUGHT_CHANCE`, `afterthought()`, `isAfterthoughtDue()` · engine `armAfterthought()` · route `/api/afterthought` |
+| หยิบเรื่องเก่ามาพูดเอง | `server/recall.js` + `server/brain.js` | `pickCallback()`, `callbackNote()`, `CALLBACK_CHANCE` |
+| ความเห็นของเธอ (opinions.md) | `server/life.js` | `noteOpinion()`, `opinionsFor()` · tool `note_opinion` |
+| ขอความเห็นผู้ใช้เรื่องในชีวิตเธอ | `server/world.js` | `stories[].askFriend`, `adviceGiven()` (memory หัวข้อ "คำแนะนำจากผู้ใช้") |
+| รู้ตารางชีวิตผู้ใช้ | `server/usage.js` | `routineNote()` · `<user_routine>` |
+| อ่านแล้วลืมตอบ | `server/pacing.js` + `server/brain.js` | `FORGOT`, `PACING.forgetChance` · `replyNoteFor()` |
 | ห่วงการใช้งาน (คุยดึก คุยเยอะ) | `server/usage.js` + `server/brain.js` | `recordUse()`, `careNote()`, `CARE_EVERY_MS` · เก็บแค่จำนวน ห้ามเก็บเนื้อหา |
 | จำเลือนเรื่องเล็กที่เก่า | `server/recall.js` | `selectMemory({ fadeDays })`, `KEEP_TOPICS` |
 | อ่าน/เขียนไฟล์ .md | `server/store.js` | |
