@@ -13,6 +13,9 @@ import { complete, afterthought, isAfterthoughtDue } from "./brain.js";
 const CHECK_EVERY_MS = 60000;
 const CHANCE_PER_CHECK = 1 / 45;       // roughly once in 45 minutes after she becomes "eligible"
 const PAGE_CLOSED_AFTER_MS = 3 * 60000;
+// The page beats every 15 s while it's on screen. A locked phone often can't say "hidden" first
+// (the page is frozen), so two missed beats already count as nobody looking
+const VIEW_STALE_MS = 40000;
 // When answering fails (brain not logged in, offline), wait longer each time instead of
 // starting Claude every minute and burning through the quota
 const RETRY_BASE_MS = 2 * 60000;
@@ -40,10 +43,9 @@ export function beat(clientId, isVisible = true) {
 }
 
 /** Someone is looking at the chat right now; a push notification would only be noise */
-export const isBeingViewed = () => isChatOpen() && presence.isVisible;
+export const isBeingViewed = () => presence.isVisible && Date.now() - presence.lastBeatAt < VIEW_STALE_MS;
 
 export const isActiveClient = (clientId) => !presence.clientId || presence.clientId === String(clientId ?? "");
-const isChatOpen = () => Date.now() - presence.lastBeatAt < PAGE_CLOSED_AFTER_MS;
 
 /* ------------------------------------ scheduler */
 
@@ -121,7 +123,9 @@ export function startAwayScheduler(send, deps) {
             // Her morning look-up runs in the background (still pinned to her), even while you chat
             maybeRefresh();
             maybeReview(complete);
-            if (isOnScreen && isChatOpen()) return;
+            // On screen right now: the page paces her replies. Hidden or locked: the server takes over,
+            // so a reply isn't stuck in a frozen tab and you get the notification
+            if (isOnScreen && isBeingViewed()) return;
             if (deps && (await answerWhileClosed(deps))) return;
             // You closed the chat right after talking: what she remembers later still reaches you
             if (isAfterthoughtDue() && !(await planReply({ texts: [] })).isAsleep) {

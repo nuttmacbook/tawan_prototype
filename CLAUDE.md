@@ -27,7 +27,8 @@
 | ตัววัดขนาด prompt, token ที่ใช้ | `server/brain.js` (`contextFor()`, `promptStats()`) + `src/components/chat.js` (`promptMeter()`) | |
 | จัดระเบียบความจำอัตโนมัติ, ยกเลิกส่ง/แก้ไขข้อความ | `server/index.js` | `maybeTidyMemory()`, routes `/api/unsend`, `/api/edit` |
 | ส่งออก/นำเข้าตัวละคร, สำรองไปโฟลเดอร์นอก | `server/portable.js` | `exportProfile()`, `importProfile()` (ห้ามเขียนชื่อไฟล์ที่ไม่ผ่านการตรวจ), `backupAll()` |
-| แจ้งเตือน Web Push | `server/push.js` + `public/sw.js` + `src/main.js` (`renderNotify()`) | ส่งเมื่อ `away.isBeingViewed()` เป็น false |
+| แจ้งเตือน Web Push | `server/push.js` + `public/sw.js` + `src/main.js` (`renderNotify()`) | ส่งเมื่อ `away.isBeingViewed()` เป็น false (หน้าซ่อนอยู่ หรือไม่ได้ beat เกิน `VIEW_STALE_MS`) |
+| อัปเดตสด: ข้อความที่เธอส่งตอนหน้าเว็บซ่อน/จอล็อก หรือทักมาเอง ขึ้นในหน้าที่เปิดอยู่ทันที | `server/live.js` (test: `test/live.test.js`) + `src/main.js` | `publish()`, `eventsSince()`, `stream()` · routes `/api/stream` (SSE), `/api/events` · หน้าเว็บ `applyLive()`, `catchUp()`, `tracked()` (ข้อความที่ตอบคำขอของหน้าเองไม่โชว์ซ้ำ) · `announce()` ใน `server/index.js` ต้องเรียกทุกที่ที่เธอพูด |
 | แชทวันก่อน ๆ | `server/store.js` (`previousDay()`) + `src/main.js` (`loadOlder()`) | |
 | หลายตัวละคร, สลับ/สร้าง/ลบ, จุดสำรองความจำ | `server/profiles.js` | `createProfile()`, `snapshot()`, `restoreSnapshot()` |
 | ตัวละครทักมาตอนปิดแชท, ตอบข้อความที่ค้างตอนปิดแชท, แท็บ/เครื่องที่ใช้งานอยู่ | `server/away.js` | ค่าคงที่ด้านบน, `answerWhileClosed()`, `startAwayScheduler()` |
