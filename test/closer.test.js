@@ -185,3 +185,17 @@ test("pickCallback: an older dated memory, never a nickname or something from to
     assert.equal(pick, "งาน: หัวหน้าให้ทำ OT ทุกวัน (2026-09-20)");
     assert.equal(pickCallback("## ชื่อเรียก\n- [2026-09-01] พี่", { now: new Date("2026-10-19").getTime() }), "");
 });
+
+test("routine: 20:55 reads as 21:00, and chatting past midnight isn't a 00:30 'first message'", async () => {
+    const usage = {};
+    for (const d of [ "05", "06", "07", "08", "09" ]) {
+        const hours = Array(24).fill(0);
+        hours[20] = 5;
+        usage[`2026-10-${d}`] = { messages: 5, late: 0, hours, first: 20 * 60 + 55 };
+    }
+    assert.match(routineNote(usage, new Date("2026-10-12T21:00:00")), /ราว 21:00 น\./);
+
+    await recordUse(1, new Date("2026-11-03T00:30:00").getTime());
+    await recordUse(1, new Date("2026-11-03T19:10:00").getTime());
+    assert.equal((await loadUsage())["2026-11-03"].first, 19 * 60 + 10);
+});

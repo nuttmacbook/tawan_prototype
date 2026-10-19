@@ -218,6 +218,11 @@ export async function planReply({ texts = [], lastAgentAt = 0, lastReadAt = 0, n
 
     // Greeting and nudge plans (no texts) are her own choice to talk, so no activity applies
     let busy = texts.length ? activityAt(now, { hour, isInChat, isAsleep, lonely, activities: await planned(persona) }) : null;
+    // Forgetting ends the moment you're talking again or need her
+    if (busy?.name === FORGOT && (isInChat || SERIOUS.test(texts.join(" ")))) {
+        doing.delete(currentId());
+        busy = null;
+    }
     // Not while you're talking back and forth, and never when you sound like you need her
     if (!busy && texts.length && !isInChat && !isAsleep && !SERIOUS.test(texts.join(" ")) && Math.random() < PACING.forgetChance) {
         busy = { name: FORGOT, until: now + between(PACING.forgetMinutes) * 60000, phoneAway: false };

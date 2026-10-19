@@ -14,7 +14,7 @@ process.on("unhandledRejection", (err) => console.error("unhandled:", err?.stack
 
 const {
     chat, greet, nudge, warmUp, resetSession, personaName, brainMode, consolidateHistory, compactMemory, hasApiKey, presence,
-    addReaction, awayPing, switchExclusive, forgetSession, noteUnsent, promptStats, cutLastReply, complete, afterthought,
+    addReaction, awayPing, switchExclusive, forgetSession, noteUnsent, promptStats, cutLastReply, complete, afterthought, cancelAfterthought,
 } = await import("./brain.js");
 const profiles = await import("./profiles.js");
 const away = await import("./away.js");
@@ -397,6 +397,7 @@ const routes = {
     "POST /api/send": async (body) => {
         if (!away.isActiveClient(body?.clientId)) throw new Error("แชทนี้เปิดใช้งานอยู่ที่อื่น");
         await store.addPending({ id: body?.id, text: body?.text });
+        cancelAfterthought();
         return { ok: true };
     },
 
@@ -491,7 +492,11 @@ const routes = {
     },
 
     // "เห้ย ลืมบอก": the page asks when the time the server picked has come; empty if it passed
-    "POST /api/afterthought": async () => ({ ...(await afterthought()), status: await statusPayload() }),
+    "POST /api/afterthought": async (body) => {
+        // A tab that lost the chat to another device mustn't use it up where nobody sees it
+        if (!away.isActiveClient(body?.clientId)) return { bubbles: [], notes: [] };
+        return { ...(await afterthought()), status: await statusPayload() };
+    },
     "POST /api/nudge": async (body) => ({ ...(await nudge(Number(body?.minutes ?? 15))), status: await statusPayload() }),
 
     "POST /api/reset": async () => {

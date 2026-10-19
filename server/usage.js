@@ -37,8 +37,11 @@ export function recordUse(count = 1, at = Date.now()) {
         // Which hours you write in, and when you first wrote that day: how she learns your routine
         day.hours = Array.from({ length: 24 }, (_, h) => Number(day.hours?.[h] ?? 0));
         day.hours[time.getHours()] += count;
-        const minute = time.getHours() * 60 + time.getMinutes();
-        day.first = Math.min(Number(day.first ?? minute), minute);
+        // Chatting past midnight isn't "first message of the day at 00:30"
+        if (time.getHours() >= LATE_UNTIL) {
+            const minute = time.getHours() * 60 + time.getMinutes();
+            day.first = Math.min(Number(day.first ?? minute), minute);
+        }
         if (new Date(at).getHours() < LATE_UNTIL) entry(dayOf(at - 86400000)).late += count;
         const keep = Object.keys(usage).sort().slice(-KEEP_DAYS);
         await writeAtomic(file, `${JSON.stringify(Object.fromEntries(keep.map((d) => [ d, usage[d] ])), null, 1)}\n`);
@@ -76,7 +79,10 @@ const median = (list) => {
     const sorted = [ ...list ].sort((x, y) => x - y);
     return sorted.length ? sorted[Math.floor(sorted.length / 2)] : null;
 };
-const clockOf = (minute) => `${String(Math.floor(minute / 60)).padStart(2, "0")}:${String(Math.round(minute % 60 / 15) * 15 % 60).padStart(2, "0")}`;
+const clockOf = (minute) => {
+    const r = (Math.round(minute / 15) * 15) % 1440;
+    return `${String(Math.floor(r / 60)).padStart(2, "0")}:${String(r % 60).padStart(2, "0")}`;
+};
 
 /** The three hours you write most in, over a set of days */
 function busiestWindow(days) {

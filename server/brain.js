@@ -3,14 +3,14 @@ import path from "node:path";
 import {
     loadTexts, loadRecentHistory, remember, teach, replaceMemoryIf, readMemoryFile,
     pastHistoryFiles, archiveHistory, appendJournal, loadSettings, logTurn, logReaction, replaceLoggedLine, bubblesForLog, uploadsDir, todayEntries,
-    FILES, safeRead,
+    FILES, safeRead, loadPending,
 } from "./store.js";
 import { loadState, passTime, markUserMessage, gapSinceUser, adjustMood, describeMood, stageOf, humanGap, agoText, timeOfDay } from "./mood.js";
 import { currentId, getActiveId } from "./profiles.js";
 import { loadThreads, addThread, closeThread, writeDiary, loadDiary, notePerson, peopleFor, noteDate, datesNote, noteOpinion, opinionsFor } from "./life.js";
 import { askApi, askClaudeCode, hasApiKey, usageOf, claudeCodeUsage, WEB_FETCH_TOOL } from "./llm.js";
 import { todayInfo, knownLinks, checkShared, linksIn } from "./world.js";
-import { humanizeReply, userStyleNote, repetitionNote, rhythmFor, capBubbles } from "./humanize.js";
+import { humanizeReply, userStyleNote, repetitionNote, rhythmFor, capBubbles, GOODBYE } from "./humanize.js";
 import { selectMemory, selectTeachings, pickCallback } from "./recall.js";
 import { FORGOT } from "./pacing.js";
 import { getConfig } from "./config.js";
@@ -77,6 +77,7 @@ const GREET_COOLDOWN_MS = 10 * 60000;
 const CARE_EVERY_MS = 3 * 3600000;
 const AFTERTHOUGHT_CHANCE = 0.15;
 const AFTERTHOUGHT_MINUTES = [ 4, 20 ];
+const AFTERTHOUGHT_EXPIRES_MS = 15 * 60000;  // later than this, "เมื่อกี้" isn't a while ago any more
 const CALLBACK_CHANCE = { chat: 0.08, opener: 0.35 };
 const SILENT = "<เงียบ>";
 
@@ -885,7 +886,8 @@ export const chat = (texts, { activity = "", readAgoMs = 0, waitedMs = 0 } = {})
             me.lastAgentAt = Date.now();
             recordReply(result, await logTurn("agent", await personaName(), bubblesForLog(shownInLog(result.bubbles, result.unsend))));
             // Sometimes something comes back to her a few minutes later; not after a goodbye
-            if (Math.random() < AFTERTHOUGHT_CHANCE && (me.rhythm?.maxBubbles ?? 2) > 1) {
+            const isGoodbye = (me.rhythm?.maxBubbles ?? 2) <= 1 || [ ...items.map((t) => t.text), ...result.bubbles ].some((t) => GOODBYE.test(t));
+            if (Math.random() < AFTERTHOUGHT_CHANCE && !isGoodbye) {
                 const ms = (AFTERTHOUGHT_MINUTES[0] + Math.random() * (AFTERTHOUGHT_MINUTES[1] - AFTERTHOUGHT_MINUTES[0])) * 60000;
                 me.afterthoughtAt = Date.now() + ms;
                 result.afterthoughtInMs = Math.round(ms);
@@ -902,7 +904,12 @@ async function callbackNote(chance) {
 }
 
 /** The afterthought she planned is due (checked by the scheduler while the chat is closed) */
-export const isAfterthoughtDue = () => me.afterthoughtAt > 0 && Date.now() >= me.afterthoughtAt;
+export const isAfterthoughtDue = () => me.afterthoughtAt > 0 && Date.now() >= me.afterthoughtAt && Date.now() < me.afterthoughtAt + AFTERTHOUGHT_EXPIRES_MS;
+
+/** Your message arrived (before she even reads it): whatever she was going to add later is moot */
+export const cancelAfterthought = () => {
+    me.afterthoughtAt = 0;
+};
 
 /**
  * "เห้ย ลืมบอก…": a short message after the chat went quiet, about what you were talking about.
@@ -910,8 +917,14 @@ export const isAfterthoughtDue = () => me.afterthoughtAt > 0 && Date.now() >= me
  */
 export const afterthought = () =>
     withLock(async () => {
-        if (!(me.afterthoughtAt > 0) || Date.now() < me.afterthoughtAt - 30000) return { bubbles: [], notes: [] };
+        const at = me.afterthoughtAt;
         me.afterthoughtAt = 0;
+        const isStale = !(at > 0) || Date.now() < at - 30000 || Date.now() > at + AFTERTHOUGHT_EXPIRES_MS;
+        // A message of yours still waiting comes first; she answers that, not her own afterthought
+        if (isStale || (await loadPending().catch(() => [])).length) {
+            if (at > 0 && Date.now() < at - 30000) me.afterthoughtAt = at;
+            return { bubbles: [], notes: [] };
+        }
         await warm();
         const minutes = Math.max(1, Math.round((Date.now() - me.lastAgentAt) / 60000));
         const result = await turn(
@@ -1002,6 +1015,7 @@ export const greet = () =>
         // Refreshing the page or restarting the server mid-conversation shouldn't make her say hello again
         if (Date.now() - Math.max(me.lastGreetAt, me.lastUserAt, await lastLoggedAt()) < GREET_COOLDOWN_MS) return { bubbles: [], notes: [] };
         me.lastGreetAt = Date.now();
+        me.afterthoughtAt = 0;
 
         const state = await loadState();
         const gap = state.lastSeen == null ? null : Date.now() - state.lastSeen;

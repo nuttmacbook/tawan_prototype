@@ -124,7 +124,7 @@ export function startAwayScheduler(send, deps) {
             if (isOnScreen && isChatOpen()) return;
             if (deps && (await answerWhileClosed(deps))) return;
             // You closed the chat right after talking: what she remembers later still reaches you
-            if (isAfterthoughtDue()) {
+            if (isAfterthoughtDue() && !(await planReply({ texts: [] })).isAsleep) {
                 const later = await afterthought();
                 if (later?.bubbles?.length) await deps?.onAgentMessage?.(later.bubbles.filter((_, i) => !(later.unsend ?? []).includes(i)));
                 return;

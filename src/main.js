@@ -1004,7 +1004,10 @@ function setElsewhere(isElsewhere) {
     const el = $("[data-elsewhere]");
     el?.classList.toggle("hidden", !isElsewhere);
     el?.classList.toggle("grid", isElsewhere);
-    if (isElsewhere) engine.stopIdle();
+    if (isElsewhere) {
+        engine.stopIdle();
+        engine.stopAfterthought();
+    }
 }
 
 // Tell the server right away when the chat is hidden or closed, so her next message becomes a push

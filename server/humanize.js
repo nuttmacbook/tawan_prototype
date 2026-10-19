@@ -205,7 +205,7 @@ const QUESTION_END = new RegExp(
 export const isQuestion = (t) => QUESTION_END.test(String(t ?? "").trim());
 
 // Not "สบาย" (ไม่สบาย, สบายดี) and not "ไปนอนได้แล้ว" said out of care
-const GOODBYE = /ฝันดี|ไปนอน(?:ละ|ก่อน|แล้วนะ)|นอนละ|นอนก่อนนะ|(?<!ส)บายย*|ไว้คุยกัน|ไปก่อนนะ|ไปละ|เจอกันพรุ่งนี้|good ?night|\bgn\b/i;
+export const GOODBYE = /ฝันดี|ไปนอน(?:ละ|ก่อน|แล้วนะ)|นอนละ|นอนก่อนนะ|(?<!ส)บายย*|ไว้คุยกัน|ไปก่อนนะ|ไปละ|เจอกันพรุ่งนี้|good ?night|\bgn\b/i;
 const bubblesOf = (t) => String(t?.text ?? "").split(/\n\s*\n/).map((b) => b.trim()).filter(Boolean);
 // Lines the app adds ("[ระบบ: ...]") aren't something the user typed
 const typedBy = (t) => String(t?.text ?? "").split("\n").filter((l) => l.trim() && !/^\[ระบบ/.test(l.trim()));

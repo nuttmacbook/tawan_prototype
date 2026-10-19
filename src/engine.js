@@ -296,7 +296,8 @@ export function createEngine({ api, ui, settings, timers = realTimers }) {
             try {
                 const plan = await getPlan([]);
                 s.isInterrupted = false;
-                const result = plan.isAsleep ? null : await api.afterthought();
+                // You wrote while she looked at the time: answer that instead
+                const result = plan.isAsleep || s.pending.length ? null : await api.afterthought(settings().clientId);
                 if (result?.bubbles?.length) {
                     ui.setTyping(true);
                     await cutReply(result, await speak(result, plan, t.now()));
@@ -388,6 +389,7 @@ export function createEngine({ api, ui, settings, timers = realTimers }) {
         glance,
         armIdle,
         stopIdle,
+        stopAfterthought,
         greet,
         schedule,
 
