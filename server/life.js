@@ -206,7 +206,12 @@ const valid = (mm, dd) => Number(mm) >= 1 && Number(mm) <= 12 && Number(dd) >= 1
  */
 export async function noteDate({ what, date } = {}) {
     const about = oneLine(what, 80).replace(/\|/g, "/");
-    const when = cleanDate(date);
+    let when = cleanDate(date);
+    // "2533-03-14" is a Buddhist-era year; a birthday told with the birth year, or any past year,
+    // is a yearly day, not one that happened once
+    const year = Number(when.slice(0, 4));
+    if (when.length === 10 && year > 2400) when = `${year - 543}${when.slice(4)}`;
+    if (when.length === 10 && (Number(when.slice(0, 4)) < new Date().getFullYear() || /วันเกิด|เกิด|ครบรอบ/.test(about))) when = when.slice(5);
     if (!about || !when) return "ต้องมีเรื่องและวันที่ (เดือน-วัน หรือ ปี-เดือน-วัน)";
     await updateText(FILES.dates, (text) => {
         const lines = String(text || DATES_HEAD).split("\n").filter((l) => !(DATE_LINE.test(l) && l.split("|")[1]?.trim() === about));
@@ -232,7 +237,8 @@ export function upcomingDays(text, { now = new Date(), firstChat = "", days = 3 
         if (!m) continue;
         const [ , year, mm, dd, about ] = m;
         for (let n = 0; n <= days; n++) {
-            const d = new Date(base.getTime() + n * 86400000);
+            // By calendar day, not 24-hour steps, which slip on daylight-saving days
+            const d = new Date(base.getFullYear(), base.getMonth(), base.getDate() + n);
             const sameDay = d.getMonth() + 1 === Number(mm) && d.getDate() === Number(dd);
             if (sameDay && (!year || d.getFullYear() === Number(year.slice(0, 4)))) out.push(`${label(n)}: ${about.trim()}`);
         }

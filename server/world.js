@@ -55,6 +55,8 @@ export async function todayInfo() {
     return life.today?.date === today() ? life.today : null;
 }
 
+const daysBefore = (n) => new Date(Date.now() - n * 86400000).toLocaleDateString("sv-SE");
+
 /** "normal" | "busy" | "away" | "sick": what kind of day she's having */
 export const dayKind = async () => (await todayInfo().catch(() => null))?.dayType ?? "normal";
 
@@ -62,9 +64,9 @@ export const dayKind = async () => (await todayInfo().catch(() => null))?.dayTyp
  * Picks the kind of day before the look-up, in code rather than by the model, so odd days stay rare
  * and never come two in a row (a model asked to "sometimes" be busy is busy every other day).
  */
-export function pickDayType(life, rand = Math.random) {
-    const last = (life?.days ?? []).at(-1);
-    if (last && last.dayType !== "normal" && last.date !== today()) return "normal";
+export function pickDayType(life, rand = Math.random, yesterday = daysBefore(1)) {
+    const last = (life?.days ?? []).find((d) => d.date === yesterday);
+    if (last && last.dayType !== "normal") return "normal";
     if (rand() >= ODD_DAY_CHANCE) return "normal";
     const r = rand();
     return r < 0.6 ? "busy" : r < 0.9 ? "away" : "sick";
@@ -222,7 +224,8 @@ async function research({ persona, life, dayType = "normal" }) {
         "",
         `ประเภทวันนี้: ${dayType === "normal" ? "วันปกติ" : DAY_KINDS[dayType]}`,
         `เมื่อวาน: ${(() => {
-            const last = (life.days ?? []).filter((d) => d.date !== today()).at(-1);
+            // Only a day that really was yesterday; a sick day from last week is old news
+            const last = (life.days ?? []).find((d) => d.date === daysBefore(1));
             return last && last.dayType !== "normal" ? `${DAY_KINDS[last.dayType] ?? last.dayType}${last.reason ? ` (${last.reason})` : ""}` : "วันปกติ";
         })()}`,
         "",

@@ -49,6 +49,12 @@ test("rhythm: after goodnight, one short bubble and no second goodbye", () => {
     assert.match(r.note, /ห้ามบอกลาซ้ำ/);
 });
 
+test("rhythm: 'ไม่สบาย' isn't goodbye, and last night's goodnight doesn't cut the morning", () => {
+    assert.equal(rhythmFor([ u("วันนี้เป็นไงบ้าง"), a("วันนี้ไม่ค่อยสบายเลย"), u("หายไวๆนะ") ]).maxBubbles, 2);
+    assert.equal(rhythmFor([ u("ไปนอนละ"), a("ฝันดีน้า"), u("ตื่นแล้ว"), a("อรุณสวัสดิ์", "กินข้าวยัง"), u("ยังเลย") ]).maxBubbles, 2);
+    assert.deepEqual([ "ยัง", "ไม่ไปไหน", "ไม่มีใคร" ].map(isQuestion), [ false, false, false ]);
+});
+
 test("rhythm: a turn the app started (greeting) isn't treated as a short message", () => {
     const r = rhythmFor([ u("[ระบบ: ผู้ใช้เพิ่งเปิดหน้าแชท]") ]);
     assert.equal(r.maxBubbles, 3);
@@ -58,6 +64,7 @@ test("rhythm: a turn the app started (greeting) isn't treated as a short message
 test("capBubbles: extras join the last one, nothing is lost", () => {
     assert.deepEqual(capBubbles([ "a", "b", "c", "d" ], 2), [ "a", "b c d" ]);
     assert.deepEqual(capBubbles([ "a" ], 2), [ "a" ]);
+    assert.deepEqual(capBubbles([ "a", "b", "😂", "[ตอบกลับ \"x\"] c" ], 2), [ "a", "b c" ]);
 });
 
 /* ------------------------------------ special days */
@@ -82,6 +89,9 @@ test("noteDate: the same thing told again keeps one line with the new date", asy
     const text = await store.readEditable("dates");
     assert.equal(text.match(/^- .*วันเกิดผู้ใช้$/gm)?.length, 1);
     assert.match(text, /- 03-15 \| วันเกิดผู้ใช้/);
+    // With the birth year (Buddhist era too), still every year
+    await noteDate({ what: "วันเกิดแม่ผู้ใช้", date: "2510-07-01" });
+    assert.match(await store.readEditable("dates"), /- 07-01 \| วันเกิดแม่ผู้ใช้/);
 });
 
 /* ------------------------------------ odd days and goals */
@@ -89,7 +99,9 @@ test("noteDate: the same thing told again keeps one line with the new date", asy
 test("pickDayType: rare, and never two odd days in a row", () => {
     assert.equal(world.pickDayType({}, () => 0.5), "normal");
     assert.equal(world.pickDayType({}, () => 0.01), "busy");
-    assert.equal(world.pickDayType({ days: [ { date: "2000-01-01", dayType: "away" } ] }, () => 0.01), "normal");
+    assert.equal(world.pickDayType({ days: [ { date: "2026-10-18", dayType: "away" } ] }, () => 0.01, "2026-10-18"), "normal");
+    // A week-old odd day doesn't count as yesterday
+    assert.equal(world.pickDayType({ days: [ { date: "2026-10-11", dayType: "away" } ] }, () => 0.01, "2026-10-18"), "busy");
 });
 
 test("cleanFound + renderToday: goals and an odd day show in today.md", () => {

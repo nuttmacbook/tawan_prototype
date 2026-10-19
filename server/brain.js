@@ -835,7 +835,8 @@ export const chat = (texts, { activity = "", readAgoMs = 0, waitedMs = 0 } = {})
         me.lastUserAt = Date.now();
         if (care) me.lastCareAt = Date.now();
         await markUserMessage(Date.now(), items.length);
-        await recordUse(items.length).catch(() => {});
+        // At the time each was sent: one from 4:50am answered after 5 still counts as a late night
+        for (const t of items) await recordUse(1, t.sentAt).catch(() => {});
         for (const t of items) await logTurn("user", "ผู้ใช้", t.text, t.sentAt);
         // Her reaction goes on the last message of the batch, the same one the page shows it on
         if (result.reaction) {
