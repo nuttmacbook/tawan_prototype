@@ -210,11 +210,106 @@ function markFailed(batch, err, { isSendFailure = false } = {}) {
     append(errorLine(err?.message ?? String(err)));
 }
 
+/* ------------------------------------ live updates (server/live.js) */
+
+// What she says arrives two ways: as the answer to the page's own request (shown with typing),
+// and as a live update (for replies written while this tab was asleep, and messages she sent
+// on her own). Updates wait while one of the page's own requests is out, then anything that
+// request didn't already contain is shown.
+const live = { boot: "", seq: 0, seen: new Set(), waiting: [], busy: 0, source: null };
+const liveKey = (boot, seq) => `${boot}:${seq}`;
+
+function markLiveSeen(result) {
+    for (const seq of result?.seqs ?? []) live.seen.add(liveKey(result?.liveBoot ?? live.boot, seq));
+}
+
+function applyLive(e) {
+    const key = liveKey(live.boot, e?.seq);
+    if (!e?.seq || live.seen.has(key)) return;
+    if (live.busy > 0) {
+        if (!live.waiting.some((w) => w.seq === e.seq)) live.waiting.push(e);
+        return;
+    }
+    live.seen.add(key);
+    live.seq = Math.max(live.seq, e.seq);
+    // Your messages it answered: read, answered, and no longer waiting in this tab
+    const ids = (e.replyTo ?? []).filter((id) => engine.find(id));
+    setReceipts(e.replyTo ?? [], "อ่านแล้ว");
+    ids.forEach((id) => engine.remove(id));
+    const unsend = new Set(e.unsend ?? []);
+    (e.bubbles ?? []).forEach((text, i) => {
+        if (unsend.has(i)) return;
+        append(bubble("agent", text, { id: `l${e.seq}-${i}`, time: clock() }));
+        // Only when this tab is in the background and push isn't set up (notify() checks both)
+        notify(text);
+    });
+    if (e.reaction && e.replyTo?.length) showReaction(e.replyTo.at(-1), e.reaction);
+    if (e.bubbles?.length) {
+        state.lastSeenAgentAt = Number(e.at) || Date.now();
+        setPresence();
+    }
+}
+
+const flushLive = () => {
+    if (live.busy > 0) return;
+    const list = live.waiting.splice(0).sort((a, b) => a.seq - b.seq);
+    list.forEach(applyLive);
+};
+
+/** Asks for anything missed: after a locked screen, a dropped stream, or a server restart */
+async function catchUp() {
+    try {
+        const res = await api.events(live.seq);
+        if (res?.boot && res.boot !== live.boot) {
+            // The server restarted: its numbers start over, and the page has nothing from it yet
+            live.boot = res.boot;
+            live.seq = 0;
+            live.seen.clear();
+            return catchUp();
+        }
+        (res?.events ?? []).forEach(applyLive);
+    } catch {}
+}
+
+function connectLive() {
+    if (typeof EventSource === "undefined") return;
+    live.source?.close();
+    const source = new EventSource("/api/stream");
+    live.source = source;
+    source.onmessage = (msg) => {
+        try {
+            applyLive(JSON.parse(msg.data));
+        } catch {}
+    };
+    // Reconnected (the browser retries on its own): fill the gap while it was down
+    source.onopen = () => catchUp();
+}
+
+/** The engine's server calls, counted so live updates wait for their answers */
+const tracked = (fn) => async (...args) => {
+    live.busy++;
+    try {
+        const result = await fn(...args);
+        markLiveSeen(result);
+        return result;
+    } finally {
+        live.busy--;
+        flushLive();
+    }
+};
+const engineApi = {
+    ...api,
+    chat: tracked(api.chat),
+    greet: tracked(api.greet),
+    nudge: tracked(api.nudge),
+    afterthought: tracked(api.afterthought),
+};
+
 /* ------------------------------------ engine */
 
 // The chat rhythm lives in engine.js; this is everything it needs from the page
 const engine = createEngine({
-    api,
+    api: engineApi,
     settings: () => ({
         clientId: state.clientId,
         idleMinutes: state.idleMinutes,
@@ -236,6 +331,7 @@ const engine = createEngine({
         markSeen,
         notify,
         isReducedMotion: () => window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+        isHidden: () => document.hidden,
         renderStatus: (status) => {
             if (!status) return;
             state.status = status;
@@ -992,6 +1088,8 @@ function notify(text) {
 /* ------------------------------------ one active tab or device */
 
 async function heartbeat() {
+    // No live stream (closed by the browser or a proxy): look for missed messages on each beat
+    if (live.source?.readyState !== 1 && !document.hidden) catchUp();
     try {
         const { isActive } = await api.beat(state.clientId, !document.hidden);
         setElsewhere(!isActive);
@@ -1014,6 +1112,21 @@ function setElsewhere(isElsewhere) {
 if (typeof document !== "undefined") {
     document.addEventListener("visibilitychange", () => {
         if (state.clientId) api.beat(state.clientId, !document.hidden).catch(() => {});
+        // Back from a locked screen or another app: show what she said meanwhile
+        if (!document.hidden) {
+            catchUp();
+            if (live.source?.readyState === 2) connectLive();
+        }
+    });
+    window.addEventListener("online", () => catchUp());
+    // Chrome freezes background tabs; say so first, so her reply becomes a notification
+    document.addEventListener("freeze", () => {
+        fetch("/api/presence/beat", {
+            method: "POST",
+            keepalive: true,
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ clientId: state.clientId, visible: false }),
+        }).catch(() => {});
     });
     window.addEventListener("pagehide", () => {
         // keepalive fetch instead of sendBeacon: the server only accepts JSON posts, and a beacon is sent as plain text
@@ -1495,6 +1608,9 @@ async function boot() {
         state.rethinkOnInterrupt = data?.rethinkOnInterrupt === true;
         state.pushPreview = data?.pushPreview !== false;
         state.lastSeenAgentAt = Number(data?.lastAgentAt ?? 0);
+        // The history below already has everything said up to this number
+        live.boot = String(data?.liveBoot ?? "");
+        live.seq = Number(data?.seq ?? 0);
         state.profileId = data?.profileId ?? "";
         state.profiles = data?.profiles ?? [];
         state.isLocal = data?.isLocal !== false;
@@ -1536,6 +1652,7 @@ async function boot() {
     // This tab now holds the chat; any other tab or device steps aside
     await api.claim(state.clientId).catch(() => {});
     setInterval(heartbeat, 15000);
+    connectLive();
     await initPush();
     renderNotify();
 

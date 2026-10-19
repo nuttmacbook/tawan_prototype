@@ -43,6 +43,7 @@ export const api = {
     greet: () => call("/api/greet", {}),
     nudge: (minutes) => call("/api/nudge", { minutes }),
     afterthought: (clientId) => call("/api/afterthought", { clientId }),
+    events: (after) => call(`/api/events?after=${encodeURIComponent(after)}`),
     reset: () => call("/api/reset", {}),
     teachings: () => call("/api/teachings"),
     teach: (lesson) => call("/api/teach", lesson),

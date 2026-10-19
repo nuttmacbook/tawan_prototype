@@ -110,7 +110,11 @@ export function createEngine({ api, ui, settings, timers = realTimers }) {
         const bubbles = Array.isArray(result?.bubbles) ? result.bubbles : [];
         const unsend = new Set(Array.isArray(result?.unsend) ? result.unsend : []);
         const cps = Number(plan?.typingCps) || 6;
-        const canAnimate = !ui.isReducedMotion?.();
+        // Nobody watching (tab hidden, screen locked): no point typing slowly, and a frozen tab
+        // would otherwise hold her reply back until you come back
+        const isHidden = () => Boolean(ui.isHidden?.());
+        const canAnimate = !ui.isReducedMotion?.() && !isHidden();
+        const nap = (ms) => (isHidden() ? Promise.resolve() : t.sleep(ms));
 
         for (const [ i, text ] of bubbles.entries()) {
             let typingMs = Math.min(9000, Math.max(600, (text.length / cps) * 1000));
@@ -118,7 +122,7 @@ export function createEngine({ api, ui, settings, timers = realTimers }) {
             if (i === 0 && result?.hesitate && canAnimate) {
                 // Started typing, stopped, thought again, and started over
                 ui.setTyping(false);
-                await t.sleep(between([ 1500, 4000 ]));
+                await nap(between([ 1500, 4000 ]));
                 ui.setTyping(true);
             } else if (i === 0) {
                 typingMs -= t.now() - startedAt;
@@ -131,7 +135,7 @@ export function createEngine({ api, ui, settings, timers = realTimers }) {
                     ui.renderStatus(result?.status);
                     return i;
                 }
-                await t.sleep(between(plan?.pauseMs));
+                await nap(between(plan?.pauseMs));
                 ui.setTyping(true);
             }
 
@@ -144,14 +148,14 @@ export function createEngine({ api, ui, settings, timers = realTimers }) {
                 typingMs *= 0.55;
             }
 
-            if (canAnimate) await t.sleep(typingMs);
+            if (canAnimate) await nap(typingMs);
             ui.setTyping(false);
             const shown = ui.showBubble(text);
             ui.markSeen();
 
             if (unsend.has(i)) {
                 // Spotted the typo, took it back; the corrected bubble comes next
-                await t.sleep(between([ 1200, 3000 ]));
+                await nap(between([ 1200, 3000 ]));
                 ui.unsendBubble(shown);
             } else {
                 ui.notify(text);
@@ -251,7 +255,8 @@ export function createEngine({ api, ui, settings, timers = realTimers }) {
             });
             // Her reaction lands on the last message of the batch, like a long-press heart
             if (result?.reaction) ui.showReaction(batch.at(-1)?.id, result.reaction);
-            if (!result?.bubbles?.length) ui.append("state", result?.reaction ? `${result.reaction} กดรีแอคแทนการตอบ` : "🙊 อ่านแล้วไม่ตอบ");
+            // Already answered elsewhere (while the screen was locked): the live update shows it
+            if (!result?.bubbles?.length && !result?.alreadyAnswered) ui.append("state", result?.reaction ? `${result.reaction} กดรีแอคแทนการตอบ` : "🙊 อ่านแล้วไม่ตอบ");
 
             // Optional (style.md "คิดใหม่เมื่อถูกพิมพ์แทรก"): you wrote something important before her first bubble
             // appeared, so she drops this answer and replies to everything together. Costs one more brain call.

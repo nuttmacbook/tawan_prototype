@@ -262,3 +262,41 @@ test("afterthought: a few minutes after her reply she adds something, unless you
     await clock.run(10 * 60000);
     assert.equal(asked - before, 1);
 });
+
+test("hidden tab: her reply is shown at once, without typing delays", async () => {
+    const clock = fakeClock();
+    const shown = [];
+    const engine = createEngine({
+        api: {
+            pacing: async () => PLAN,
+            read: async () => {},
+            cut: async () => {},
+            greet: async () => ({ bubbles: [] }),
+            nudge: async () => ({ bubbles: [] }),
+            chat: async () => ({ bubbles: [ "ยาวมากกกกกกกกกกกกกกกกกกกกกกกกกกกกกกกก", "อีกอันนึงก็ยาวนะะะะะะะะะะะะะะะะะะะะ" ] }),
+        },
+        ui: {
+            append: () => {}, setTyping: () => {}, setPresence: () => {}, setReceipts: () => {}, showReaction: () => {},
+            markFailed: () => {}, markSeen: () => {}, notify: () => {}, isReducedMotion: () => false, renderStatus: () => {},
+            isHidden: () => true,
+            showBubble: (text) => {
+                shown.push(text);
+                return `b${shown.length}`;
+            },
+            unsendBubble: () => {},
+        },
+        timers: clock.timers,
+        settings: () => ({ clientId: "c1", idleMinutes: 0, rethinkOnInterrupt: false, showNotes: false }),
+    });
+    engine.add({ id: "a", text: "เล่ามา" });
+    // Read 1s + think 0.5s; no typing time for ~70 characters at 10/s
+    await clock.run(2000);
+    assert.equal(shown.length, 2);
+});
+
+test("already answered while the screen was locked: no 'อ่านแล้วไม่ตอบ' line", async () => {
+    const { engine, clock, log } = setup({ replies: [ { bubbles: [], alreadyAnswered: true } ] });
+    engine.add({ id: "a", text: "หวัดดี" });
+    await clock.run(10000);
+    assert.equal(log.some(([ k, text ]) => k === "state" && /อ่านแล้วไม่ตอบ/.test(String(text))), false);
+});

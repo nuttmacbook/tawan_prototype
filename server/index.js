@@ -30,6 +30,7 @@ const { styleSettings } = await import("./humanize.js");
 const config = await import("./config.js");
 const world = await import("./world.js");
 const coach = await import("./coach.js");
+const live = await import("./live.js");
 const { claudeCodeStatus, API_MODEL, CC_MODEL } = await import("./llm.js");
 const { isLocal, clientIp, isHttps, lanAddresses, makeHostCheck, isOwnPage } = await import("./gate.js");
 
@@ -120,7 +121,16 @@ const mergeReplies = (list) => {
         notes: done.flatMap((r) => r?.notes ?? []),
         unsend,
         hesitate: done.some((r) => r?.hesitate),
+        // Which live updates this reply already contains, so the page doesn't show them twice
+        seqs: done.flatMap((r) => r?.seqs ?? []),
     };
+};
+
+/** Tells open pages (live.js) about something she said, and marks the reply with its number */
+const announce = (result, extra = {}) => {
+    if (!result?.bubbles?.length && !result?.reaction) return result;
+    const seq = live.publish({ ...extra, bubbles: result.bubbles, unsend: result.unsend, reaction: result.reaction });
+    return { ...result, seqs: [ ...(result.seqs ?? []), seq ], liveBoot: live.BOOT };
 };
 
 /** The bubbles that stay on screen: a typo she takes back isn't something to put on a lock screen */
@@ -156,9 +166,10 @@ async function replyToPending(ids, context = {}) {
             // which would call Claude twice for one failure (the closed-chat scheduler backs off)
             if (failed && !earlier.length) throw failed.reason;
             settle.resolve(EMPTY_REPLY);
-            return mergeReplies(earlier);
+            // Answered already (by the scheduler while the screen was locked): the page gets it from live.js
+            return earlier.length ? mergeReplies(earlier) : { ...EMPTY_REPLY, alreadyAnswered: true };
         }
-        const result = await chat(items, context);
+        const result = announce(await chat(items, context), { type: "reply", replyTo: items.map((m) => m.id) });
         await store.removePending(items.map((m) => m.id));
         // Unsent while she was typing: it's in the log now, so take it back there.
         // Checked again after each one, since another take-back can arrive during the loop.
@@ -254,6 +265,9 @@ const routes = {
         pushPreview: (await config.getConfig()).pushPreview,
         rethinkOnInterrupt: styleSettings((await store.loadTexts()).style).rethink,
         lastAgentAt: presence().lastAgentAt,
+        // Everything up to here is already in `history`
+        seq: live.latestSeq(),
+        liveBoot: live.BOOT,
         isLocal: isLocal(req),
         lan: isLocal(req) ? await remoteInfo() : null,
     }),
@@ -488,16 +502,19 @@ const routes = {
     "POST /api/greet": async () => {
         // A new day may have started while the server was running
         await consolidateHistory().catch((err) => console.error("summary failed:", err?.message));
-        return { ...(await greet()), status: await statusPayload() };
+        return { ...announce(await greet()), status: await statusPayload() };
     },
 
     // "เห้ย ลืมบอก": the page asks when the time the server picked has come; empty if it passed
     "POST /api/afterthought": async (body) => {
         // A tab that lost the chat to another device mustn't use it up where nobody sees it
         if (!away.isActiveClient(body?.clientId)) return { bubbles: [], notes: [] };
-        return { ...(await afterthought()), status: await statusPayload() };
+        return { ...announce(await afterthought()), status: await statusPayload() };
     },
-    "POST /api/nudge": async (body) => ({ ...(await nudge(Number(body?.minutes ?? 15))), status: await statusPayload() }),
+    "POST /api/nudge": async (body) => ({ ...announce(await nudge(Number(body?.minutes ?? 15))), status: await statusPayload() }),
+
+    // What she said that this page hasn't shown yet (after a locked screen or a dropped connection)
+    "GET /api/events": async (_, url) => live.eventsSince(url.searchParams.get("after")),
 
     "POST /api/reset": async () => {
         resetSession();
@@ -564,6 +581,9 @@ async function handleApiNow(req, res, url) {
     if (req.method !== "GET" && req.method !== "HEAD" && !isOwnPage(req)) {
         return send(res, 403, { error: "คำขอนี้ไม่ได้มาจากหน้าแชทของแอป" });
     }
+
+    // A live stream stays open, so it skips the JSON routes too
+    if (req.method === "GET" && url.pathname === "/api/stream") return live.stream(req, res);
 
     // Pictures are binary, so they skip the JSON routes
     if (req.method === "GET" && url.pathname.startsWith("/api/upload/")) {
@@ -812,7 +832,11 @@ away.startAwayScheduler(awayPing, {
     planReply,
     pending: store.loadPending,
     reply: (ids, context) => replyToPending(ids, context),
-    onAgentMessage: pushMessage,
+    // She texted first, or remembered something, while nobody was looking: open pages and phones hear it
+    onAgentMessage: (bubbles) => {
+        live.publish({ type: "say", bubbles });
+        return pushMessage(bubbles);
+    },
 });
 portable.startBackupScheduler();
 
