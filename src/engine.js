@@ -204,6 +204,12 @@ export function createEngine({ api, ui, settings, timers = realTimers }) {
      * or (her choice, via the brain) reads and doesn't reply at all.
      */
     async function reply(plan) {
+        // Answered already (the server did it while this tab slept): no "read but busy" for nothing
+        if (!s.pending.length) {
+            ui.setPresence();
+            armIdle();
+            return;
+        }
         s.isReplying = true;
         stopIdle();
 

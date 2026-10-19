@@ -224,10 +224,16 @@ function markLiveSeen(result) {
 }
 
 function applyLive(e) {
-    const key = liveKey(live.boot, e?.seq);
-    if (!e?.seq || live.seen.has(key)) return;
+    if (!e?.seq) return;
+    // A new server process numbers from 1 again; its events are told apart by their boot id
+    if (e.boot && e.boot !== live.boot) {
+        live.boot = e.boot;
+        live.seq = 0;
+    }
+    const key = liveKey(e.boot ?? live.boot, e.seq);
+    if (live.seen.has(key)) return;
     if (live.busy > 0) {
-        if (!live.waiting.some((w) => w.seq === e.seq)) live.waiting.push(e);
+        if (!live.waiting.some((w) => liveKey(w.boot, w.seq) === key)) live.waiting.push(e);
         return;
     }
     live.seen.add(key);
@@ -240,9 +246,11 @@ function applyLive(e) {
     (e.bubbles ?? []).forEach((text, i) => {
         if (unsend.has(i)) return;
         append(bubble("agent", text, { id: `l${e.seq}-${i}`, time: clock() }));
-        // Only when this tab is in the background and push isn't set up (notify() checks both)
-        notify(text);
+        // Only when this tab is in the background and push isn't set up (notify() checks both);
+        // a tab that's "open elsewhere" stays quiet so you don't get one per tab
+        if (!state.isElsewhere) notify(text);
     });
+    if (!e.bubbles?.length && !e.reaction && e.replyTo?.length) append(stateNote("🙊 อ่านแล้วไม่ตอบ"));
     if (e.reaction && e.replyTo?.length) showReaction(e.replyTo.at(-1), e.reaction);
     if (e.bubbles?.length) {
         state.lastSeenAgentAt = Number(e.at) || Date.now();
@@ -252,19 +260,19 @@ function applyLive(e) {
 
 const flushLive = () => {
     if (live.busy > 0) return;
-    const list = live.waiting.splice(0).sort((a, b) => a.seq - b.seq);
+    const list = live.waiting.splice(0).sort((a, b) => a.at - b.at);
     list.forEach(applyLive);
 };
 
 /** Asks for anything missed: after a locked screen, a dropped stream, or a server restart */
 async function catchUp() {
     try {
-        const res = await api.events(live.seq);
+        const res = await api.events(live.seq, state.profileId);
         if (res?.boot && res.boot !== live.boot) {
-            // The server restarted: its numbers start over, and the page has nothing from it yet
+            // The server restarted: its numbers start over. Keys carry the boot id, so what this
+            // page already got from the new process (a reply over HTTP) stays marked as seen
             live.boot = res.boot;
             live.seq = 0;
-            live.seen.clear();
             return catchUp();
         }
         (res?.events ?? []).forEach(applyLive);
@@ -274,7 +282,7 @@ async function catchUp() {
 function connectLive() {
     if (typeof EventSource === "undefined") return;
     live.source?.close();
-    const source = new EventSource("/api/stream");
+    const source = new EventSource(`/api/stream?profile=${encodeURIComponent(state.profileId ?? "")}`);
     live.source = source;
     source.onmessage = (msg) => {
         try {

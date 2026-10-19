@@ -12,7 +12,11 @@ export const BOOT = Math.random().toString(36).slice(2, 10);
 const KEEPALIVE_MS = 20000;   // tunnels and phones drop a silent connection
 const feeds = new Map();
 
-const feed = (id = currentId()) => {
+// The page names its own character: a tab left on one character must not get another's messages
+// after you switch on a different device
+const idOf = (id) => (/^[\w-]{1,64}$/.test(String(id ?? "")) ? String(id) : currentId());
+const feed = (id) => {
+    id = idOf(id);
     if (!feeds.has(id)) feeds.set(id, { seq: 0, events: [], listeners: new Set() });
     return feeds.get(id);
 };
@@ -27,6 +31,7 @@ export function publish(event) {
     const f = feed();
     const item = {
         seq: ++f.seq,
+        boot: BOOT,
         at: Date.now(),
         type: event?.type === "reply" ? "reply" : "say",
         bubbles: Array.isArray(event?.bubbles) ? event.bubbles.map(String) : [],
@@ -43,19 +48,19 @@ export function publish(event) {
 }
 
 /** The latest number, for a page that just loaded everything from the log */
-export const latestSeq = () => feed().seq;
+export const latestSeq = (id) => feed(id).seq;
 
 /** What a page missed after `after` */
-export const eventsSince = (after) => {
-    const f = feed();
+export const eventsSince = (after, id) => {
+    const f = feed(id);
     const n = Number(after) || 0;
     // After a server restart the numbers start again; a page ahead of us has missed nothing we know of
     return { boot: BOOT, seq: f.seq, events: n > f.seq ? [] : f.events.filter((e) => e.seq > n) };
 };
 
 /** An open EventSource connection for the current character */
-export function stream(req, res) {
-    const f = feed();
+export function stream(req, res, id) {
+    const f = feed(id);
     res.writeHead(200, {
         "content-type": "text/event-stream; charset=utf-8",
         "cache-control": "no-store, no-transform",

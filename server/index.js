@@ -126,9 +126,16 @@ const mergeReplies = (list) => {
     };
 };
 
+/** A hidden tab can still ask her to speak (nudge, afterthought); you hear it on your phone */
+const pushIfAway = (result) => {
+    if (result?.bubbles?.length && !isWatching()) pushMessage(visibleBubbles(result));
+    return result;
+};
+
 /** Tells open pages (live.js) about something she said, and marks the reply with its number */
 const announce = (result, extra = {}) => {
-    if (!result?.bubbles?.length && !result?.reaction) return result;
+    // A reply with nothing said still tells the page "read, no reply" for those messages
+    if (!result?.bubbles?.length && !result?.reaction && !extra.replyTo?.length) return result;
     const seq = live.publish({ ...extra, bubbles: result.bubbles, unsend: result.unsend, reaction: result.reaction });
     return { ...result, seqs: [ ...(result.seqs ?? []), seq ], liveBoot: live.BOOT };
 };
@@ -253,24 +260,34 @@ const routes = {
     // scripts/run.js asks this after a restart: if it fails, the new code is rolled back
     "GET /api/health": async () => ({ ok: true, name: await personaName(), status: await statusPayload() }),
 
-    "GET /api/bootstrap": async (_, url, req) => ({
-        name: await personaName(),
-        profileId: profiles.getActiveId(),
-        profiles: await profiles.listProfiles(),
-        brain: await brainPayload(),
-        status: await statusPayload(),
-        history: await store.todayEntries(),
-        pending: await store.loadPending(),
-        idleMinutes: (await config.getConfig()).idleMinutes,
-        pushPreview: (await config.getConfig()).pushPreview,
-        rethinkOnInterrupt: styleSettings((await store.loadTexts()).style).rethink,
-        lastAgentAt: presence().lastAgentAt,
-        // Everything up to here is already in `history`
-        seq: live.latestSeq(),
-        liveBoot: live.BOOT,
-        isLocal: isLocal(req),
-        lan: isLocal(req) ? await remoteInfo() : null,
-    }),
+    "GET /api/bootstrap": async (_, url, req) => {
+        // The log and the live number must match: a reply written while the log was being read
+        // would otherwise be in neither (or in both). Read again if one slipped in between.
+        let seq = live.latestSeq();
+        let history = await store.todayEntries();
+        for (let i = 0; i < 3 && seq !== live.latestSeq(); i++) {
+            seq = live.latestSeq();
+            history = await store.todayEntries();
+        }
+        return {
+            name: await personaName(),
+            profileId: profiles.getActiveId(),
+            profiles: await profiles.listProfiles(),
+            brain: await brainPayload(),
+            status: await statusPayload(),
+            history,
+            pending: await store.loadPending(),
+            idleMinutes: (await config.getConfig()).idleMinutes,
+            pushPreview: (await config.getConfig()).pushPreview,
+            rethinkOnInterrupt: styleSettings((await store.loadTexts()).style).rethink,
+            lastAgentAt: presence().lastAgentAt,
+            // Everything up to here is already in `history`
+            seq,
+            liveBoot: live.BOOT,
+            isLocal: isLocal(req),
+            lan: isLocal(req) ? await remoteInfo() : null,
+        };
+    },
 
     /* ---------- one active device */
 
@@ -502,19 +519,19 @@ const routes = {
     "POST /api/greet": async () => {
         // A new day may have started while the server was running
         await consolidateHistory().catch((err) => console.error("summary failed:", err?.message));
-        return { ...announce(await greet()), status: await statusPayload() };
+        return { ...pushIfAway(announce(await greet())), status: await statusPayload() };
     },
 
     // "เห้ย ลืมบอก": the page asks when the time the server picked has come; empty if it passed
     "POST /api/afterthought": async (body) => {
         // A tab that lost the chat to another device mustn't use it up where nobody sees it
         if (!away.isActiveClient(body?.clientId)) return { bubbles: [], notes: [] };
-        return { ...announce(await afterthought()), status: await statusPayload() };
+        return { ...pushIfAway(announce(await afterthought())), status: await statusPayload() };
     },
-    "POST /api/nudge": async (body) => ({ ...announce(await nudge(Number(body?.minutes ?? 15))), status: await statusPayload() }),
+    "POST /api/nudge": async (body) => ({ ...pushIfAway(announce(await nudge(Number(body?.minutes ?? 15)))), status: await statusPayload() }),
 
     // What she said that this page hasn't shown yet (after a locked screen or a dropped connection)
-    "GET /api/events": async (_, url) => live.eventsSince(url.searchParams.get("after")),
+    "GET /api/events": async (_, url) => live.eventsSince(url.searchParams.get("after"), url.searchParams.get("profile")),
 
     "POST /api/reset": async () => {
         resetSession();
@@ -583,7 +600,7 @@ async function handleApiNow(req, res, url) {
     }
 
     // A live stream stays open, so it skips the JSON routes too
-    if (req.method === "GET" && url.pathname === "/api/stream") return live.stream(req, res);
+    if (req.method === "GET" && url.pathname === "/api/stream") return live.stream(req, res, url.searchParams.get("profile"));
 
     // Pictures are binary, so they skip the JSON routes
     if (req.method === "GET" && url.pathname.startsWith("/api/upload/")) {
