@@ -31,6 +31,7 @@ const config = await import("./config.js");
 const world = await import("./world.js");
 const coach = await import("./coach.js");
 const live = await import("./live.js");
+const builder = await import("./builder.js");
 const { claudeCodeStatus, API_MODEL, CC_MODEL } = await import("./llm.js");
 const { isLocal, clientIp, isHttps, lanAddresses, makeHostCheck, isOwnPage } = await import("./gate.js");
 
@@ -352,6 +353,16 @@ const routes = {
     },
 
     // Waits for a reply that is still being written, so it is saved to the character it belongs to
+    // The new-character form: files written from what you filled in, then she's the one on screen
+    "POST /api/profiles/build": async (body) => {
+        const made = await builder.buildCharacter(body?.spec ?? {}, complete);
+        await switchExclusive(() => profiles.switchProfile(made.id), { reset: true });
+        clearActivity();
+        return made;
+    },
+    // What the form would write, without creating anything (no AI)
+    "POST /api/profiles/preview": async (body) => ({ files: await builder.renderAll(builder.cleanSpec(body?.spec ?? {})) }),
+
     "POST /api/profiles/switch": async (body) => {
         await switchExclusive(() => profiles.switchProfile(body?.id));
         clearActivity();
@@ -583,7 +594,7 @@ const routes = {
 const LOCAL_ONLY = /^\/api\/(logic\/|restart|remote\/)/;
 
 // These change which character is active, so they must not be pinned to the old one
-const UNPINNED = new Set([ "/api/profiles/switch", "/api/profiles/create", "/api/profiles/import", "/api/snapshots/restore" ]);
+const UNPINNED = new Set([ "/api/profiles/switch", "/api/profiles/create", "/api/profiles/build", "/api/profiles/import", "/api/snapshots/restore" ]);
 
 /**
  * Every other request works on the character that was active when it arrived, even if you

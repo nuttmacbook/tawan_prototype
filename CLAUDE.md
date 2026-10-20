@@ -31,6 +31,7 @@
 | อัปเดตสด: ข้อความที่เธอส่งตอนหน้าเว็บซ่อน/จอล็อก หรือทักมาเอง ขึ้นในหน้าที่เปิดอยู่ทันที | `server/live.js` (test: `test/live.test.js`) + `src/main.js` | `publish()`, `eventsSince()`, `stream()` · routes `/api/stream` (SSE), `/api/events` · หน้าเว็บ `applyLive()`, `catchUp()`, `tracked()` (ข้อความที่ตอบคำขอของหน้าเองไม่โชว์ซ้ำ) · `announce()` ใน `server/index.js` ต้องเรียกทุกที่ที่เธอพูด |
 | แชทวันก่อน ๆ | `server/store.js` (`previousDay()`) + `src/main.js` (`loadOlder()`) | |
 | หลายตัวละคร, สลับ/สร้าง/ลบ, จุดสำรองความจำ | `server/profiles.js` | `createProfile()`, `snapshot()`, `restoreSnapshot()` |
+| ฟอร์มสร้างตัวละครใหม่ (กรอกข้อมูล → สร้างไฟล์ → เปิดแชทใหม่) | `server/builder.js` (test: `test/builder.test.js`) + `src/components/builder.js` + `src/main.js` | `cleanSpec()` (อายุขั้นต่ำ `MIN_AGE`), `renderPersona()` (บรรทัดที่ระบบอ่านต้องคงรูปแบบ), `FILL_SYSTEM`, `cleanExtra()` · routes `/api/profiles/build`, `/api/profiles/preview` · หน้าเว็บ `openBuilder()`, `buildCharacter()`, `BUILDER_EXAMPLE` |
 | ตัวละครทักมาตอนปิดแชท, ตอบข้อความที่ค้างตอนปิดแชท, แท็บ/เครื่องที่ใช้งานอยู่ | `server/away.js` | ค่าคงที่ด้านบน, `answerWhileClosed()`, `startAwayScheduler()` |
 | ข้อความที่ส่งแล้วแต่เธอยังไม่ตอบ (กันหายตอนรีเฟรช) | `server/store.js` + `server/index.js` | `addPending()`, `replyToPending()`, route `/api/send` |
 | รูป, สติกเกอร์, ตอบกลับ, รีแอคชัน (ฝั่งสมอง) | `server/brain.js` | `<chat_features>` ใน `stablePrompt`, `turn()`, `addReaction()` |
