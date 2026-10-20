@@ -1,5 +1,6 @@
 // Her day from the web, people around her, links and fading memories.
 // No brain and no network: only the parts that check, store and choose.
+import "./quiet.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp } from "node:fs/promises";

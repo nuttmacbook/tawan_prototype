@@ -1,5 +1,6 @@
 // Live updates (server/live.js): numbered per character, missed ones can be fetched again,
 // and a stream gets each one as it happens.
+import "./quiet.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp } from "node:fs/promises";

@@ -1,5 +1,6 @@
 // Closer to a real friend: the shape of a turn, special days, odd days and goals, the coach,
 // and noticing late nights. No brain and no network.
+import "./quiet.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, writeFile, readFile } from "node:fs/promises";
