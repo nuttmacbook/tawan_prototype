@@ -1,4 +1,5 @@
 // The new-character form (server/builder.js): what you fill in becomes files the app reads correctly.
+import "./quiet.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile } from "node:fs/promises";
