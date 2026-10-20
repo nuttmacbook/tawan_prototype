@@ -56,6 +56,8 @@ export const api = {
     beat: (clientId, visible = true) => call("/api/presence/beat", { clientId, visible }),
     switchProfile: (id) => call("/api/profiles/switch", { id }),
     createProfile: (name, copy) => call("/api/profiles/create", { name, copy }),
+    buildCharacter: (spec) => call("/api/profiles/build", { spec }),
+    previewCharacter: (spec) => call("/api/profiles/preview", { spec }),
     deleteProfile: (id) => call("/api/profiles/delete", { id }),
     snapshots: () => call("/api/snapshots"),
     createSnapshot: () => call("/api/snapshots/create", {}),

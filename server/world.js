@@ -168,7 +168,8 @@ async function refresh({ force }) {
 }
 
 const nameOf = (persona) => String(persona ?? "").match(/ชื่อ\s*[:：]\s*(.+)/)?.[1]?.trim() || "เธอ";
-const cityOf = (persona) => String(persona ?? "").match(/เมือง\s*[:：]\s*(.+)/)?.[1]?.trim() ?? "";
+// Only a "- เมือง: ..." line, not "เมือง:" inside some other sentence of persona.md
+const cityOf = (persona) => String(persona ?? "").match(/^\s*-\s*เมือง\s*[:：]\s*(.+)$/m)?.[1]?.trim() ?? "";
 
 const thaiDate = () => new Date().toLocaleDateString("th-TH", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
 

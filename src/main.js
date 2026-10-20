@@ -7,6 +7,7 @@ import { overlays, searchResults } from "./components/overlays.js";
 import { logicPanel, logicEvent, backupList, logicWorking } from "./components/logic.js";
 import { esc } from "./components/ui.js";
 import { createEngine } from "./engine.js";
+import { builderPanel, BUILDER_EXAMPLE } from "./components/builder.js";
 
 /* ------------------------------------ state */
 
@@ -81,6 +82,7 @@ function paint() {
             ${logicPanel(state)}
         </div>
         ${overlays}
+        ${builderPanel}
     `;
 }
 
@@ -1337,6 +1339,7 @@ if (typeof window !== "undefined") {
     window.addEventListener("keydown", (e) => {
         if (e.key === "Escape") {
             window.closeSearch();
+            window.closeBuilder?.();
             window.closePopovers();
             $("[data-image-viewer]")?.classList.add("hidden");
             $("[data-profile-menu]")?.classList.add("hidden");
@@ -1383,7 +1386,92 @@ if (typeof window !== "undefined") {
         }
     };
 
+    /* ---------- new character form (components/builder.js) */
+
+    const builderForm = () => $("[data-builder-form]");
+    const readBuilder = () => {
+        const form = builderForm();
+        if (!form) return {};
+        const spec = Object.fromEntries(new FormData(form).entries());
+        spec.useAI = Boolean(form.useAI?.checked);
+        return spec;
+    };
+    const fillBuilder = (spec = {}) => {
+        const form = builderForm();
+        if (!form) return;
+        for (const el of form.elements) {
+            if (!el.name) continue;
+            if (el.type === "checkbox") el.checked = spec[el.name] !== false;
+            else el.value = spec[el.name] ?? (el.tagName === "SELECT" ? el.options[0]?.value ?? "" : "");
+        }
+    };
+    const builderMsg = (text) => {
+        const el = $("[data-builder-msg]");
+        if (el) el.textContent = text;
+    };
+
+    window.openBuilder = () => {
+        $("[data-profile-menu]")?.classList.add("hidden");
+        // A half-filled form comes back after closing it by mistake
+        fillBuilder(readPref("builderDraft", {}));
+        const el = $("[data-builder]");
+        el?.classList.remove("hidden");
+        el?.classList.add("flex");
+        builderForm()?.name?.focus();
+    };
+    window.closeBuilder = () => {
+        const el = $("[data-builder]");
+        el?.classList.add("hidden");
+        el?.classList.remove("flex");
+    };
+    window.saveBuilderDraft = () => writePref("builderDraft", readBuilder());
+    window.fillBuilderExample = () => {
+        fillBuilder(BUILDER_EXAMPLE);
+        window.saveBuilderDraft();
+        builderMsg("ใส่ตัวอย่างแล้ว แก้ได้ตามใจ");
+    };
+    window.resetBuilder = () => {
+        fillBuilder({});
+        writePref("builderDraft", {});
+        const pre = $("[data-builder-preview]");
+        if (pre) pre.classList.add("hidden");
+        builderMsg("");
+    };
+    window.previewCharacter = async () => {
+        try {
+            const { files } = await api.previewCharacter(readBuilder());
+            const pre = $("[data-builder-preview]");
+            if (pre) {
+                // textContent: the form's text is shown, never run
+                pre.textContent = `persona.md\n\n${files?.persona ?? ""}\n\nmemory.md\n\n${files?.memory ?? ""}`;
+                pre.classList.remove("hidden");
+            }
+            builderMsg(readBuilder().useAI ? "ตัวอย่างนี้ยังไม่รวมส่วนที่ AI จะเติม" : "");
+        } catch (err) {
+            builderMsg(err?.message ?? String(err));
+        }
+    };
+    window.buildCharacter = async (e) => {
+        e?.preventDefault?.();
+        const spec = readBuilder();
+        const btn = $("[data-builder-submit]");
+        if (btn) btn.disabled = true;
+        builderMsg(spec.useAI ? "กำลังสร้าง ให้ AI เติมรายละเอียด อาจใช้เวลาราวหนึ่งนาที…" : "กำลังสร้าง…");
+        try {
+            const made = await api.buildCharacter(spec);
+            writePref("builderDraft", {});
+            // Shown after the reload, so it isn't lost with the page
+            if (made?.filled === false && spec.useAI) writePref("builderNotice", "สร้างตัวละครจากข้อมูลในฟอร์มแล้ว แต่ AI เติมรายละเอียดไม่สำเร็จ (ดูว่าสมองล็อกอินอยู่ไหม) แก้เพิ่มได้ในแถบสอน");
+            location.reload();
+        } catch (err) {
+            builderMsg(err?.message ?? String(err));
+            if (btn) btn.disabled = false;
+        }
+    };
+
     window.createProfile = async (isCopy) => {
+        // A new character starts from the form; copying this one still just asks for a name
+        if (!isCopy) return window.openBuilder();
         const name = prompt(isCopy ? `ชื่อของตัวละครใหม่ (คัดลอกตัวตน สไตล์ และสิ่งที่สอนจาก ${state.name})` : "ชื่อของตัวละครใหม่");
         if (name == null) return;
         try {
@@ -1652,6 +1740,12 @@ async function boot() {
             messagesEl()?.insertAdjacentHTML("beforeend", bubble("user", m.text, { id: m.id, time, receipt: m.readAt ? "อ่านแล้ว" : "ส่งแล้ว", isEdited: Boolean(m.isEdited) }));
         }
         engine.restore(data?.pending);
+        // A note from the new-character form, kept across its reload
+        const notice = readPref("builderNotice", "");
+        if (notice) {
+            writePref("builderNotice", "");
+            append(stateNote(String(notice)));
+        }
         scrollDown(true);
         setPresence();
 

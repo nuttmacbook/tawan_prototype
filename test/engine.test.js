@@ -1,5 +1,6 @@
 // The chat rhythm from src/engine.js, run with a fake clock: minutes of chatting take milliseconds,
 // and every step is checked without a browser.
+import "./quiet.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createEngine } from "../src/engine.js";

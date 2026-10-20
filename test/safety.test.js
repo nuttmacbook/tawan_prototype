@@ -1,5 +1,6 @@
 // Runs without npm packages or Claude: only the parts that don't need a brain.
 // The data folder is a fresh temp copy, so your real characters are never touched.
+import "./quiet.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, writeFile, readFile } from "node:fs/promises";
