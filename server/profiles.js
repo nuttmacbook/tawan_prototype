@@ -25,6 +25,9 @@ const SETTINGS_BACKUP = path.join(DATA_DIR, "settings.json.bak");
 const MD_FILES = [ "persona", "style", "teachings", "memory", "state", "threads", "diary", "journal", "people", "today", "dates", "opinions" ];
 // What a copied character keeps; everything about the relationship starts fresh
 const IDENTITY_FILES = [ "persona", "style", "teachings" ];
+// Her life as the system keeps it (city, story arcs, goals; coach suggestions; your routine).
+// Not editable by hand, but part of her: snapshots and the portable file carry them too
+const DATA_FILES = [ "life", "coach", "usage" ];
 const KEEP_SNAPSHOTS = 30;
 
 let activeId = "";
@@ -274,6 +277,10 @@ export async function snapshot(label = "", { keep = "" } = {}) {
         const from = fileOf(name);
         if (await exists(from)) await cp(from, path.join(dir, `${name}.md`));
     }
+    for (const name of DATA_FILES) {
+        const from = path.join(activeDir(), `${name}.json`);
+        if (await exists(from)) await cp(from, path.join(dir, `${name}.json`));
+    }
     if (await exists(path.join(activeDir(), "history"))) {
         await copyHistory(path.join(activeDir(), "history"), path.join(dir, "history"));
     }
@@ -319,6 +326,13 @@ export async function restoreSnapshot(id) {
         const text = await readFileText(from);
         await withFileLock(fileOf(n), () => writeAtomic(fileOf(n), text));
     }
+    for (const n of DATA_FILES) {
+        const from = path.join(dir, `${n}.json`);
+        if (!(await exists(from))) continue;
+        const text = await readFileText(from);
+        const to = path.join(activeDir(), `${n}.json`);
+        await withFileLock(to, () => writeAtomic(to, text));
+    }
     if (await exists(path.join(dir, "history"))) {
         // Today's log is the only history file anything else writes to
         const todayLog = path.join(activeDir(), "history", `${today()}.md`);
@@ -330,4 +344,4 @@ export async function restoreSnapshot(id) {
     return safety;
 }
 
-export { DATA_DIR, PERSONAS_DIR, MD_FILES };
+export { DATA_DIR, PERSONAS_DIR, MD_FILES, DATA_FILES };

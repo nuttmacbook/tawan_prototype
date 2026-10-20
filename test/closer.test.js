@@ -199,3 +199,26 @@ test("routine: 20:55 reads as 21:00, and chatting past midnight isn't a 00:30 'f
     await recordUse(1, new Date("2026-11-03T19:10:00").getTime());
     assert.equal((await loadUsage())["2026-11-03"].first, 19 * 60 + 10);
 });
+
+/* ------------------------------------ her life travels with her */
+
+test("export/import and snapshots carry life.json, coach.json and usage.json", async () => {
+    const { exportProfile, importProfile } = await import("../server/portable.js");
+    const { writeFile: write } = await import("node:fs/promises");
+    const dir = profiles.activeDir();
+    await write(path.join(dir, "life.json"), JSON.stringify({ city: "ชลบุรี", goals: [ { title: "พันซับ" } ] }));
+
+    const pack = await exportProfile(profiles.getActiveId());
+    assert.match(pack.data.life, /ชลบุรี/);
+    assert.ok(pack.data.usage);
+    // Something that isn't an object is ignored on import
+    const { id } = await importProfile({ ...pack, data: { ...pack.data, coach: "[1,2]" } });
+    const moved = path.join(path.dirname(dir), id);
+    assert.match(await readFile(path.join(moved, "life.json"), "utf8"), /พันซับ/);
+    await assert.rejects(readFile(path.join(moved, "coach.json"), "utf8"));
+
+    const snap = await profiles.snapshot("ทดสอบ");
+    await write(path.join(dir, "life.json"), JSON.stringify({ city: "เชียงใหม่" }));
+    await profiles.restoreSnapshot(snap);
+    assert.match(await readFile(path.join(dir, "life.json"), "utf8"), /ชลบุรี/);
+});
