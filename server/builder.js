@@ -17,10 +17,12 @@ const TEMPLATE_DIR = fileURLToPath(new URL("./templates/", import.meta.url));
 const MIN_AGE = 18;
 
 const RELATIONS = {
-    stranger: { label: "เพิ่งรู้จักกัน", closeness: 5 },
-    friend:   { label: "เพื่อน", closeness: 30 },
-    close:    { label: "เพื่อนสนิท", closeness: 60 },
-    family:   { label: "สนิทมากเหมือนคนในครอบครัว", closeness: 85 },
+    // chat: how this chat started, when the form doesn't say. Without it her first message has no
+    // reason to exist, and she opened with "อ้าว พี่" as if you'd just written to her
+    stranger: { label: "เพิ่งรู้จักกัน", closeness: 5, chat: "เพิ่งได้ช่องทางแชทกัน ยังไม่เคยคุยในแชทนี้มาก่อน" },
+    friend:   { label: "เพื่อน", closeness: 30, chat: "เพิ่งแลกช่องทางแชทกัน นี่เป็นครั้งแรกที่คุยกันในแชท" },
+    close:    { label: "เพื่อนสนิท", closeness: 60, chat: "คุยแชทกันเป็นประจำอยู่แล้ว" },
+    family:   { label: "สนิทมากเหมือนคนในครอบครัว", closeness: 85, chat: "คุยแชทกันเป็นประจำอยู่แล้ว" },
 };
 
 // Words the system reads with a colon ("เวลาตื่น: 8") lose the colon inside free text, so "ทำกะดึก
@@ -75,6 +77,7 @@ export function cleanSpec(raw = {}) {
         samples: lines(raw.samples, 30, 120).map((s) => redact(s).trim()).filter(Boolean),
         relation,
         howMet: line(raw.howMet, 200),
+        firstChat: line(raw.firstChat, 200) || RELATIONS[relation].chat,
         closeness: int(raw.closeness, 0, 100, RELATIONS[relation].closeness),
         memories: lines(raw.memories, 30, 200),
         people: lines(raw.people, 15, 160),
@@ -116,6 +119,7 @@ export function renderPersona(spec, extra = {}) {
         section("ความสัมพันธ์กับผู้ใช้", [
             `- ตอนนี้เป็น: ${RELATIONS[spec.relation].label}`,
             spec.howMet && `- รู้จักกันจาก: ${spec.howMet}`,
+            `- แชทนี้: ${spec.firstChat}`,
         ].filter(Boolean).join("\n")),
         "",
         "## จังหวะการตอบ",
