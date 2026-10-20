@@ -20,7 +20,7 @@ jobs:
         shell: bash
         run: |
           for i in $(seq 1 30); do
-            if ! node --test test/closer.test.js > test.log 2>&1; then
+            if ! npm test > test.log 2>&1; then
               msg=$(grep -n -B2 -A30 "not ok" test.log | head -120 | sed ':a;N;$!ba;s/\n/%0A/g')
               echo "::error title=run $i failed::$msg"
               exit 1
