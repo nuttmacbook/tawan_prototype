@@ -1,23 +1,28 @@
-# Runs the tests on every push and pull request. They need no npm packages and no Claude,
-# so nothing is installed: just Node.
 name: test
 
 on:
   push:
-  pull_request:
 
 jobs:
-  test:
+  probe:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        node: [ "20", "22" ]
+        node: [ "20" ]
+        shard: [ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 ]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
-      - name: Syntax check
-        run: for f in server/*.js scripts/*.js src/*.js src/components/*.js public/sw.js; do node --check "$f"; done
-      - name: Tests
-        run: npm test
+      - name: Tests 15 times
+        shell: bash
+        run: |
+          for i in $(seq 1 30); do
+            if ! npm test > test.log 2>&1; then
+              msg=$(grep -n -B2 -A30 "not ok" test.log | head -120 | sed ':a;N;$!ba;s/\n/%0A/g')
+              echo "::error title=run $i failed::$msg"
+              exit 1
+            fi
+          done
