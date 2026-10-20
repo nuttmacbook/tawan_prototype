@@ -302,7 +302,7 @@ const MAX_CORRECTIONS = 40;
 const MAX_SAMPLES = 80;
 
 /** Removes things that shouldn't end up in a prompt file: links, phone numbers, emails */
-const redact = (s) =>
+export const redact = (s) =>
     String(s ?? "")
         .replace(/https?:\/\/\S+/g, "[ลิงก์]")
         .replace(/[\w.+-]+@[\w-]+\.[\w.]+/g, "[อีเมล]")

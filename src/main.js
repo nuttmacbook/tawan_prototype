@@ -1460,7 +1460,8 @@ if (typeof window !== "undefined") {
         try {
             const made = await api.buildCharacter(spec);
             writePref("builderDraft", {});
-            builderMsg(made?.filled === false && spec.useAI ? "สร้างแล้ว (AI เติมไม่สำเร็จ ใช้ข้อมูลจากฟอร์ม)" : "สร้างแล้ว");
+            // Shown after the reload, so it isn't lost with the page
+            if (made?.filled === false && spec.useAI) writePref("builderNotice", "สร้างตัวละครจากข้อมูลในฟอร์มแล้ว แต่ AI เติมรายละเอียดไม่สำเร็จ (ดูว่าสมองล็อกอินอยู่ไหม) แก้เพิ่มได้ในแถบสอน");
             location.reload();
         } catch (err) {
             builderMsg(err?.message ?? String(err));
@@ -1739,6 +1740,12 @@ async function boot() {
             messagesEl()?.insertAdjacentHTML("beforeend", bubble("user", m.text, { id: m.id, time, receipt: m.readAt ? "อ่านแล้ว" : "ส่งแล้ว", isEdited: Boolean(m.isEdited) }));
         }
         engine.restore(data?.pending);
+        // A note from the new-character form, kept across its reload
+        const notice = readPref("builderNotice", "");
+        if (notice) {
+            writePref("builderNotice", "");
+            append(stateNote(String(notice)));
+        }
         scrollDown(true);
         setPresence();
 

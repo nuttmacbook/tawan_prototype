@@ -352,7 +352,6 @@ const routes = {
         return { id };
     },
 
-    // Waits for a reply that is still being written, so it is saved to the character it belongs to
     // The new-character form: files written from what you filled in, then she's the one on screen
     "POST /api/profiles/build": async (body) => {
         const made = await builder.buildCharacter(body?.spec ?? {}, complete);
@@ -363,6 +362,7 @@ const routes = {
     // What the form would write, without creating anything (no AI)
     "POST /api/profiles/preview": async (body) => ({ files: await builder.renderAll(builder.cleanSpec(body?.spec ?? {})) }),
 
+    // Waits for a reply that is still being written, so it is saved to the character it belongs to
     "POST /api/profiles/switch": async (body) => {
         await switchExclusive(() => profiles.switchProfile(body?.id));
         clearActivity();

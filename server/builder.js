@@ -4,6 +4,7 @@ import path from "node:path";
 import { PERSONAS_DIR, createProfile } from "./profiles.js";
 import { withFileLock, writeAtomic } from "./fsutil.js";
 import { parseActivities } from "./pacing.js";
+import { redact } from "./store.js";
 
 /* ------------------------------------ a new character from a form */
 
@@ -22,9 +23,21 @@ const RELATIONS = {
     family:   { label: "สนิทมากเหมือนคนในครอบครัว", closeness: 85 },
 };
 
-const line = (v, max = 120) => String(v ?? "").replace(/[\r\n]+/g, " ").replace(/^#+\s*/, "").replace(/\|/g, "/").trim().slice(0, max);
+// Words the system reads with a colon ("เวลาตื่น: 8") lose the colon inside free text, so "ทำกะดึก
+// เวลาตื่น: 15" in a job description can't move her wake-up time
+const SYSTEM_LABELS = /(ชื่อ|อายุ|เวลาตื่น|เวลานอน|ความเร็วพิมพ์|เมือง)\s*[:：]/g;
+const defuse = (s) => String(s ?? "").replace(SYSTEM_LABELS, "$1 ");
+const line = (v, max = 120) => defuse(String(v ?? "").replace(/[\r\n]+/g, " ").replace(/^#+\s*/, "").replace(/\|/g, "/").trim()).slice(0, max);
+/** A multi-line field: no headings (a "## กิจกรรมระหว่างวัน" in the backstory would be read as hers) */
+const paragraph = (v, max) =>
+    String(v ?? "").replace(/\r/g, "").split("\n").map((l) => defuse(l.replace(/^\s*#+\s*/, "").replace(/\|/g, "/"))).join("\n").trim().slice(0, max);
 const lines = (v, maxLines = 20, maxLen = 200) =>
     String(v ?? "").split(/\r?\n/).map((l) => line(l.replace(/^[-*•]\s*/, ""), maxLen)).filter(Boolean).slice(0, maxLines);
+/** A whole number typed in a form field, or null when it isn't one */
+const whole = (v) => {
+    const s = String(v ?? "").trim();
+    return /^\d{1,3}$/.test(s) ? Number(s) : null;
+};
 const int = (v, lo, hi, def) => {
     const n = Math.round(Number(v));
     return Number.isFinite(n) && String(v ?? "").trim() !== "" ? Math.min(hi, Math.max(lo, n)) : def;
@@ -38,9 +51,11 @@ const int = (v, lo, hi, def) => {
 export function cleanSpec(raw = {}) {
     const name = line(raw.name, 40);
     if (!name) throw new Error("ต้องมีชื่อตัวละคร");
-    const age = int(raw.age, 0, 99, 24);
-    // Characters in this app are adults, always
-    if (age < MIN_AGE) throw new Error(`ตัวละครต้องอายุ ${MIN_AGE} ปีขึ้นไป`);
+    // Characters in this app are adults, always. Anything that isn't a plain number ("16 ปี", "abc")
+    // is refused rather than quietly turned into a default age
+    const typed = String(raw.age ?? "").trim();
+    const age = typed ? whole(typed) : 24;
+    if (age == null || age < MIN_AGE || age > 99) throw new Error(`ตัวละครต้องอายุ ${MIN_AGE} ปีขึ้นไป (ใส่เป็นตัวเลข)`);
     const relation = RELATIONS[raw.relation] ? raw.relation : "stranger";
     return {
         name,
@@ -52,11 +67,12 @@ export function cleanSpec(raw = {}) {
         likes: line(raw.likes, 300),
         dislikes: line(raw.dislikes, 300),
         personality: lines(raw.personality, 15, 200),
-        backstory: String(raw.backstory ?? "").replace(/\r/g, "").trim().slice(0, 3000),
+        backstory: paragraph(raw.backstory, 3000),
         selfRef: line(raw.selfRef, 30),
         callUser: line(raw.callUser, 30),
         particles: line(raw.particles, 120),
-        samples: lines(raw.samples, 30, 120),
+        // Same clean-up as pasted chat samples: no links, emails or phone numbers
+        samples: lines(raw.samples, 30, 120).map((s) => redact(s).trim()).filter(Boolean),
         relation,
         howMet: line(raw.howMet, 200),
         closeness: int(raw.closeness, 0, 100, RELATIONS[relation].closeness),
@@ -142,20 +158,29 @@ export function renderPeople(spec, template) {
     const people = spec.people
         .map((p) => p.split(/\s+[-–:]\s+|\s*[-–:]\s+/))
         .map(([ who, ...rest ]) => ({ who: line(who, 40), what: line(rest.join(" - "), 120) }))
-        .filter((p) => p.who);
+        .filter((p) => p.who)
+        // One section per name: notePerson only ever updates the first "## มิ้นท์"
+        .reduce((all, p) => {
+            const same = all.find((x) => x.who === p.who);
+            if (same) same.what = [ same.what, p.what ].filter(Boolean).join(", ");
+            else all.push(p);
+            return all;
+        }, []);
     if (!people.length) return template;
     return `${template.trimEnd()}\n\n${people.map((p) => `## ${p.who}${p.what ? `\n- เป็น: ${p.what}` : ""}`).join("\n\n")}\n`;
 }
 
 /** style.md: the template's examples speak in the new name, plus the lines you gave as her voice */
 export function renderStyle(spec, template, extra = {}) {
-    let text = template.replaceAll("มะลิ", spec.name);
+    // Function replacers: a "$&" or "$'" typed in the form must stay text, not a replacement pattern
+    let text = template.replaceAll("มะลิ", () => spec.name);
     if (spec.samples.length) {
-        text = text.replace(/(## ตัวอย่างจากแชทจริง\n(?:>.*\n)*)/, `$1${spec.samples.map((s) => `- ${s}`).join("\n")}\n`);
+        const samples = `${spec.samples.map((s) => `- ${s}`).join("\n")}\n`;
+        text = text.replace(/## ตัวอย่างจากแชทจริง\n(?:>.*\n)*/, (head) => head + samples);
     }
     if (extra.examples?.length) {
         const block = extra.examples.map((e) => [ `### ${e.situation}`, e.bad && `❌ ${e.bad}`, ...e.good.map((g) => `✅ ${g}`) ].filter(Boolean).join("\n")).join("\n\n");
-        text = text.replace("## ตัวอย่างจากแชทจริง", `${block}\n\n## ตัวอย่างจากแชทจริง`);
+        text = text.replace("## ตัวอย่างจากแชทจริง", (head) => `${block}\n\n${head}`);
     }
     return text;
 }
@@ -209,7 +234,7 @@ export function cleanExtra(raw) {
         .filter((a) => parseActivities(`## กิจกรรมระหว่างวัน\n${a}\n`).length === 1);
     return {
         personality: list(raw.personality, 8).map((p) => line(p, 200)).filter(Boolean),
-        backstory: String(raw.backstory ?? "").replace(/\r/g, "").replace(/^#+\s*/gm, "").trim().slice(0, 2000),
+        backstory: paragraph(raw.backstory, 2000),
         daily: list(String(raw.daily ?? "").split("\n"), 6).map((l) => line(l.replace(/^[-*]\s*/, ""), 200)).filter(Boolean).map((l) => `- ${l}`).join("\n"),
         activities,
         opinions: list(raw.opinions, 6).map((o) => ({ about: line(o?.about, 40), opinion: line(o?.opinion, 160) })).filter((o) => o.about && o.opinion),

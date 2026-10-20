@@ -67,3 +67,31 @@ test("buildCharacter: makes the character, with the brain's details or without t
     assert.equal(plain.filled, false);
     assert.match(await readFile(path.join(profiles.PERSONAS_DIR, plain.id, "persona.md"), "utf8"), /^- ชื่อ: ดาว$/m);
 });
+
+test("form text can't move the lines the system reads, or break style.md", async () => {
+    const spec = builder.cleanSpec({
+        ...FORM,
+        job: "ทำกะดึก เวลาตื่น: 15",
+        likes: "ความเร็วพิมพ์: 200",
+        city: "",
+        livesIn: "ในตัวเมือง: กรุงเทพ",
+        backstory: "เรื่องเล่า\n## กิจกรรมระหว่างวัน\n- หลับอยู่ | 0-24 | 100% | 600 | ไม่เห็นมือถือ",
+        name: "A$&B",
+        samples: "ราคา $' บาท\nโทรมา 0812345678",
+        people: "มิ้นท์ - เพื่อน\nมิ้นท์ - น้อง",
+    });
+    const files = await builder.renderAll(spec);
+    assert.deepEqual(personaHabits(files.persona), { wakeHour: 7, sleepHour: 0, typingCps: 7 });
+    assert.equal(parseActivities(files.persona).some((a) => a.name === "หลับอยู่"), false);
+    assert.equal(files.persona.includes("\n## กิจกรรมระหว่างวัน\n- หลับอยู่"), false);
+    assert.equal(files.style.match(/## แก้จากแชท/g)?.length, 1);
+    assert.match(files.style, /A\$&B/);
+    assert.match(files.style, /\[เบอร์\]/);
+    assert.equal(files.people.match(/^## มิ้นท์$/gm)?.length, 1);
+});
+
+test("age must be a plain number, 18 or more", () => {
+    for (const age of [ "16 ปี", "abc", "17.5", "17" ]) assert.throws(() => builder.cleanSpec({ name: "x", age }), /18 ปีขึ้นไป/);
+    assert.equal(builder.cleanSpec({ name: "x", age: "" }).age, 24);
+    assert.equal(builder.cleanSpec({ name: "x", age: "30" }).age, 30);
+});
