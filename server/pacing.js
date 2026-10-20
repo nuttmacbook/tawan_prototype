@@ -106,6 +106,17 @@ function activityAt(now, { hour, isInChat, isAsleep, lonely, activities }) {
     return null;
 }
 
+const rolled = new Map();
+/** True the first time this exact batch of messages is planned (per character, for 6 hours) */
+function firstRoll(texts) {
+    const key = `${currentId()}\u0000${texts.join("\u0000")}`;
+    const now = Date.now();
+    for (const [ k, at ] of rolled) if (now - at > 6 * 3600000) rolled.delete(k);
+    if (rolled.has(key)) return false;
+    rolled.set(key, now);
+    return true;
+}
+
 /** Today's plan from the morning look-up comes first, then her usual habits from persona.md */
 const planned = async (persona) => [ ...(await todayActivities().catch(() => [])), ...parseActivities(persona) ];
 
@@ -223,8 +234,10 @@ export async function planReply({ texts = [], lastAgentAt = 0, lastReadAt = 0, n
         doing.delete(currentId());
         busy = null;
     }
-    // Not while you're talking back and forth, and never when you sound like you need her
-    if (!busy && texts.length && !isInChat && !isAsleep && !SERIOUS.test(texts.join(" ")) && Math.random() < PACING.forgetChance) {
+    // Not while you're talking back and forth, and never when you sound like you need her.
+    // One roll per batch: the closed-chat scheduler asks every minute, and rolling each time
+    // would make a message that waits an hour almost sure to be "forgotten"
+    if (!busy && texts.length && !isInChat && !isAsleep && !SERIOUS.test(texts.join(" ")) && firstRoll(texts) && Math.random() < PACING.forgetChance) {
         busy = { name: FORGOT, until: now + between(PACING.forgetMinutes) * 60000, phoneAway: false };
         doing.set(currentId(), busy);
     }

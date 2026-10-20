@@ -1,6 +1,6 @@
 import { mkdir, readFile, writeFile, readdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
-import { PERSONAS_DIR, MD_FILES, listProfiles, createProfile, loadSettings, saveSettings } from "./profiles.js";
+import { PERSONAS_DIR, MD_FILES, DATA_FILES, listProfiles, createProfile, loadSettings, saveSettings } from "./profiles.js";
 
 /* ------------------------------------ format */
 
@@ -62,6 +62,13 @@ export async function exportProfile(id, { mode = "full", withImages = false } = 
     }
     const pending = await readText(path.join(dir, "pending.json"));
     if (pending) pack.pending = pending;
+    // City, story arcs and goals, coach suggestions, your routine: without these a moved
+    // character would wake up in a new city with no goals
+    pack.data = {};
+    for (const name of DATA_FILES) {
+        const text = await readText(path.join(dir, `${name}.json`));
+        if (text) pack.data[name] = text;
+    }
 
     if (withImages) {
         pack.uploads = {};
@@ -116,6 +123,16 @@ export async function importProfile(input) {
     if (typeof pack.pending === "string") {
         try {
             if (Array.isArray(JSON.parse(pack.pending))) await writeFile(path.join(dir, "pending.json"), pack.pending);
+        } catch {}
+    }
+
+    // Known names only, and each must be a JSON object, so a crafted file can't plant anything else
+    for (const name of DATA_FILES) {
+        const text = pack.data?.[name];
+        if (typeof text !== "string") continue;
+        try {
+            const value = JSON.parse(text);
+            if (value && typeof value === "object" && !Array.isArray(value)) await writeFile(path.join(dir, `${name}.json`), `${JSON.stringify(value, null, 1)}\n`);
         } catch {}
     }
 

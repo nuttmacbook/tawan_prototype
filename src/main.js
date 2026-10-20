@@ -216,7 +216,9 @@ function markFailed(batch, err, { isSendFailure = false } = {}) {
 // and as a live update (for replies written while this tab was asleep, and messages she sent
 // on her own). Updates wait while one of the page's own requests is out, then anything that
 // request didn't already contain is shown.
-const live = { boot: "", seq: 0, seen: new Set(), waiting: [], busy: 0, source: null };
+// lastLogged: her last line in the history the page loaded with, for the moment a reply was
+// written to the log just before the page read it but announced just after
+const live = { boot: "", seq: 0, seen: new Set(), waiting: [], busy: 0, source: null, lastLogged: null };
 const liveKey = (boot, seq) => `${boot}:${seq}`;
 
 function markLiveSeen(result) {
@@ -243,6 +245,10 @@ function applyLive(e) {
     setReceipts(e.replyTo ?? [], "อ่านแล้ว");
     ids.forEach((id) => engine.remove(id));
     const unsend = new Set(e.unsend ?? []);
+    const said = (e.bubbles ?? []).filter((_, i) => !unsend.has(i)).join(" / ");
+    const isAlreadyShown = live.lastLogged && said && said === live.lastLogged.text && Date.now() - live.lastLogged.at < 120000;
+    live.lastLogged = null;
+    if (isAlreadyShown) return;
     (e.bubbles ?? []).forEach((text, i) => {
         if (unsend.has(i)) return;
         append(bubble("agent", text, { id: `l${e.seq}-${i}`, time: clock() }));
@@ -1638,6 +1644,8 @@ async function boot() {
                 if (p) messagesEl()?.insertAdjacentHTML("beforeend", bubble(entry.who, p, { ...options, reaction: entry.reactions?.[k] ?? "" }));
             });
         });
+        const lastAgent = history.filter((entry) => entry.who === "agent").at(-1);
+        if (lastAgent) live.lastLogged = { text: String(lastAgent.text ?? ""), at: Date.now() };
         // Messages you sent that she hasn't answered yet: still waiting, even after a refresh
         for (const m of data?.pending ?? []) {
             const time = new Date(m.sentAt).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
