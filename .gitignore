@@ -3,6 +3,8 @@ dist/
 .env
 data/.brain/
 data/settings.json
+# Accounts: password hashes never go to GitHub (chats can, the testers agreed)
+data/users.json
 data/settings.json.bak
 data/.backups/
 data/.snapshots/

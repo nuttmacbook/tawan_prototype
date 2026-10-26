@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { activeDir, currentId } from "./profiles.js";
+import { dataFileOf, currentId } from "./profiles.js";
 import { historyDir, safeRead, FILES, today, teach, listTeachings } from "./store.js";
 import { withFileLock, writeAtomic } from "./fsutil.js";
 import { getConfig } from "./config.js";
@@ -17,7 +17,7 @@ const MAX_PENDING = 30;
 const MAX_AGE_DAYS = 3;          // older days aren't worth a review any more
 const MIN_LINES = 6;             // a two-line day has nothing to learn from
 
-const coachFile = () => path.join(activeDir(), "coach.json");
+const coachFile = () => dataFileOf("coach");
 
 export async function loadCoach() {
     try {

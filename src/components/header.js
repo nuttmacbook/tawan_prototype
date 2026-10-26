@@ -1,9 +1,11 @@
 import { esc, CARD, EYEBROW, initial } from "./ui.js";
+import { chatListMenu, accountMenu } from "./people.js";
 
+// who: teaching is for the character's owner, editlogic (the server's code) for the admin
 const TABS = [
-    { id: "chat",  label: "แชท",      icon: "💬" },
-    { id: "teach", label: "สอน",      icon: "✎" },
-    { id: "logic", label: "editlogic", icon: "⚙" },
+    { id: "chat",  label: "แชท",      icon: "💬", who: "" },
+    { id: "teach", label: "สอน",      icon: "✎", who: "data-owner" },
+    { id: "logic", label: "editlogic", icon: "⚙", who: "data-admin" },
 ];
 
 const BRAINS = [
@@ -60,10 +62,10 @@ const brainPicker = (brain) => {
 };
 
 const tabs = (active) => /*html*/`
-    <nav class="grid grid-cols-3 gap-1 rounded-2xl bg-slate-950/60 p-1 ring-1 ring-inset ring-white/5" role="tablist" aria-label="สลับแถบ" data-debug>
+    <nav class="flex gap-1 rounded-2xl bg-slate-950/60 p-1 ring-1 ring-inset ring-white/5" role="tablist" aria-label="สลับแถบ" data-debug>
         ${TABS.map((t) => /*html*/`
-            <button type="button" role="tab" data-tab-btn="${t.id}" aria-selected="${t.id === active}" onclick="switchTab('${t.id}')"
-                class="flex items-center justify-center gap-1.5 rounded-xl px-2 py-2 text-sm font-semibold text-slate-400 transition hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/60 aria-selected:bg-sky-500 aria-selected:text-slate-950 aria-selected:shadow-[0_8px_24px_-12px_rgba(14,165,233,0.8)] sm:gap-2 sm:px-4">
+            <button type="button" role="tab" data-tab-btn="${t.id}" aria-selected="${t.id === active}" onclick="switchTab('${t.id}')" ${t.who}
+                class="flex flex-1 items-center justify-center gap-1.5 rounded-xl px-2 py-2 text-sm font-semibold text-slate-400 transition hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/60 aria-selected:bg-sky-500 aria-selected:text-slate-950 aria-selected:shadow-[0_8px_24px_-12px_rgba(14,165,233,0.8)] sm:gap-2 sm:px-4">
                 <span aria-hidden="true">${t.icon}</span><span class="truncate">${t.label}</span>
             </button>
         `).join("")}
@@ -104,8 +106,7 @@ const remoteLinks = (lan) => {
     }
     return /*html*/`
         ${parts.join("")}
-        <p class="mt-2 text-[11px] text-slate-500">ลิงก์มีรหัสอยู่ข้างใน ใครได้ไปก็เข้าแชทได้ อย่าแชร์ · เปิดครั้งเดียว เครื่องนั้นจะจำไว้</p>
-        <button type="button" onclick="rotateKey()" class="mt-1 rounded-lg px-2 py-1 text-[11px] text-rose-300 hover:bg-rose-500/10">เปลี่ยนรหัส (ทุกเครื่องที่เคยเปิดต้องเปิดลิงก์ใหม่)</button>
+        <p class="mt-2 text-[11px] text-slate-500">ทุกคนเข้าด้วยบัญชีของตัวเอง · คนใหม่สมัครด้วยรหัสเชิญ (เมนูด้านล่าง)</p>
     `;
 };
 
@@ -114,32 +115,19 @@ const remoteLinks = (lan) => {
  * Delete and copy are debug-only so full role still feels like a plain chat app.
  */
 const profileMenu = (state) => {
-    const list = Array.isArray(state?.profiles) ? state.profiles : [];
     const lan = state?.lan;
     return /*html*/`
-        <div class="absolute left-0 top-full z-30 mt-2 hidden w-[min(19rem,calc(100vw-2rem))] space-y-1 rounded-2xl border border-white/10 bg-slate-900/95 p-2 shadow-2xl backdrop-blur" data-profile-menu>
-            <p class="px-2 pb-1 pt-1 ${EYEBROW}">แชท</p>
-            ${list.map((p) => /*html*/`
-                <div class="flex items-center gap-1">
-                    <button type="button" data-id="${esc(p.id)}" onclick="switchProfile(this.dataset.id)"
-                        class="flex min-w-0 flex-1 items-center gap-2.5 rounded-xl px-2 py-2 text-left text-sm transition hover:bg-white/5 ${p.id === state?.profileId ? "bg-sky-500/10 ring-1 ring-inset ring-sky-400/30" : ""}">
-                        <span class="grid h-8 w-8 shrink-0 place-items-center rounded-xl bg-gradient-to-br from-pink-400 to-sky-500 text-sm font-bold text-slate-950">${initial(p.name)}</span>
-                        <span class="truncate text-white">${esc(p.name)}</span>
-                        ${p.id === state?.profileId ? `<span class="ml-auto text-xs text-sky-300">✓</span>` : ""}
-                    </button>
-                    ${p.id === state?.profileId ? "" : `<button type="button" data-debug data-id="${esc(p.id)}" data-name="${esc(p.name)}" onclick="deleteProfile(this.dataset.id, this.dataset.name)" class="rounded-lg px-2 py-1 text-xs text-rose-300/70 hover:bg-rose-500/10 hover:text-rose-200" aria-label="ลบ ${esc(p.name)}">ลบ</button>`}
-                </div>
-            `).join("")}
-            <button type="button" onclick="createProfile(false)" class="w-full rounded-xl px-2 py-2 text-left text-sm text-sky-300 hover:bg-white/5">+ ตัวละครใหม่</button>
-            <button type="button" data-debug onclick="createProfile(true)" class="w-full rounded-xl px-2 py-2 text-left text-sm text-slate-300 hover:bg-white/5">⧉ คัดลอกตัวนี้ (ไม่เอาความจำ)</button>
+        <div class="scroll-slim absolute left-0 top-full z-30 mt-2 hidden max-h-[75vh] w-[min(20rem,calc(100vw-2rem))] space-y-1 overflow-y-auto rounded-2xl border border-white/10 bg-slate-900/95 p-2 shadow-2xl backdrop-blur" data-profile-menu>
+            <div data-chat-list>${chatListMenu(state)}</div>
             <div class="my-1 h-px bg-white/5"></div>
             <div data-notify-area></div>
-            ${state?.isLocal ? /*html*/`
+            ${state?.isLocal && state?.me?.isAdmin ? /*html*/`
                 <details class="rounded-xl px-2 py-1 text-sm text-slate-300" data-remote>
                     <summary class="cursor-pointer py-1 hover:text-white">📱 เปิดบนมือถือ / จากข้างนอก</summary>
                     <div data-remote-body>${remoteLinks(lan)}</div>
                 </details>
             ` : ""}
+            ${accountMenu(state?.me)}
         </div>
     `;
 };
@@ -152,6 +140,7 @@ const header = (state) => /*html*/`
                     <span class="relative grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-gradient-to-br from-pink-400 to-sky-500 text-lg font-bold text-slate-950 shadow-lg sm:h-12 sm:w-12" data-avatar>
                         ${initial(state?.name)}
                         <span class="absolute -bottom-0.5 -right-0.5 h-3.5 w-3.5 rounded-full border-2 border-slate-900 bg-slate-500 transition-colors" data-online-dot></span>
+                        <span class="absolute -right-1.5 -top-1.5 hidden h-4 min-w-4 place-items-center rounded-full bg-pink-500 px-1 text-[10px] font-bold text-slate-950" data-menu-badge></span>
                     </span>
                     <span class="min-w-0">
                         <span class="hidden sm:block ${EYEBROW}" data-debug>Broker</span>
@@ -164,8 +153,8 @@ const header = (state) => /*html*/`
                 ${profileMenu(state)}
             </div>
             <button type="button" onclick="openSearch()" class="grid h-8 w-8 shrink-0 place-items-center rounded-full text-base text-slate-400 transition hover:bg-white/5 hover:text-white" aria-label="ค้นหาข้อความ">🔍</button>
-            <div data-brain data-debug>${brainPicker(state?.brain)}</div>
-            <div data-full-role-slot>${fullRoleButton(state?.isFullRole)}</div>
+            <div data-brain data-debug data-admin>${brainPicker(state?.brain)}</div>
+            <div data-full-role-slot data-owner>${fullRoleButton(state?.isFullRole)}</div>
         </div>
         ${tabs(state?.tab ?? "chat")}
     </header>

@@ -77,23 +77,29 @@ const isPushEndpoint = (endpoint) => {
  * @param {{ endpoint: string, keys: { p256dh: string, auth: string } }} sub
  * @param {string} label e.g. "มือถือ" so the list is readable
  */
-export async function subscribe(sub, label = "") {
+export async function subscribe(sub, label = "", user = "") {
     if (!isPushEndpoint(sub?.endpoint) || typeof sub?.keys?.p256dh !== "string" || typeof sub?.keys?.auth !== "string") {
         throw new Error("ข้อมูลการแจ้งเตือนไม่ถูกต้อง");
     }
     await ensureKeys();
     const list = await changeSubs((current) => [
         ...current.filter((s) => s.endpoint !== sub.endpoint),
-        { endpoint: sub.endpoint, keys: { p256dh: sub.keys.p256dh.slice(0, 200), auth: sub.keys.auth.slice(0, 100) }, label: String(label).slice(0, 60), at: Date.now() },
+        // A phone belongs to whoever signed in on it: their characters' messages go there, nobody else's
+        { endpoint: sub.endpoint, keys: { p256dh: sub.keys.p256dh.slice(0, 200), auth: sub.keys.auth.slice(0, 100) }, label: String(label).slice(0, 60), at: Date.now(), user: String(user ?? "") },
     ]);
-    return list.length;
+    return list.filter((s) => s.user === String(user ?? "")).length;
 }
 
-export async function unsubscribe(endpoint) {
-    await changeSubs((list) => list.filter((s) => s.endpoint !== String(endpoint ?? "")));
+export async function unsubscribe(endpoint, user = "") {
+    await changeSubs((list) => list.filter((s) => !(s.endpoint === String(endpoint ?? "") && s.user === String(user ?? ""))));
 }
 
-export const subscriptionCount = async () => (await loadSubs()).length;
+export const subscriptionCount = async (user = "") => (await loadSubs()).filter((s) => s.user === String(user ?? "")).length;
+
+/** Phones set up before accounts belong to the first account */
+export async function adoptSubs(user) {
+    await changeSubs((list) => list.map((s) => (s.user ? s : { ...s, user })));
+}
 
 /* ------------------------------------ sending */
 
@@ -103,9 +109,9 @@ export const subscriptionCount = async () => (await loadSubs()).length;
  * @param {{ title: string, body: string, tag?: string }} message
  * @returns {Promise<number>} devices reached
  */
-export async function notifyAll({ title, body, tag = "persona-chat" }) {
+export async function notifyAll({ title, body, tag = "persona-chat", user = "" }) {
     // Older entries from before the endpoint check are skipped too
-    const list = (await loadSubs()).filter((s) => isPushEndpoint(s.endpoint));
+    const list = (await loadSubs()).filter((s) => isPushEndpoint(s.endpoint) && (s.user ?? "") === String(user ?? ""));
     if (!list.length) return 0;
     await ensureKeys();
 

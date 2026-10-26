@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { PERSONAS_DIR, createProfile } from "./profiles.js";
+import { createProfile, pinProfile, fileOf } from "./profiles.js";
 import { withFileLock, writeAtomic } from "./fsutil.js";
 import { parseActivities } from "./pacing.js";
 import { redact } from "./store.js";
@@ -94,6 +94,18 @@ const DEFAULT_ACTIVITIES = [
     "- ทำงานอยู่ | 9-17 | 15% | 3-15 | อ่านแต่ยังไม่ตอบ",
 ];
 
+/**
+ * relation.md of the creator's own chat: how she knows the person who made her.
+ * Anyone else who adds her starts from the template (they just found her in the app).
+ */
+export const renderRelation = (spec) => [
+    "## ความสัมพันธ์กับผู้ใช้คนนี้",
+    `- ตอนนี้เป็น: ${RELATIONS[spec.relation].label}`,
+    spec.howMet && `- รู้จักกันจาก: ${spec.howMet}`,
+    `- แชทนี้: ${spec.firstChat}`,
+    "",
+].filter((l) => l !== "" && l !== false && l != null).join("\n") + "\n";
+
 /** persona.md in the template's layout: the lines the system reads keep their exact wording */
 export function renderPersona(spec, extra = {}) {
     const field = (label, value) => `- ${label}: ${value ?? ""}`.trimEnd();
@@ -116,11 +128,6 @@ export function renderPersona(spec, extra = {}) {
         field("ชอบ", spec.likes),
         field("ไม่ชอบ", spec.dislikes),
         section("เรื่องราวของเธอ", [ spec.backstory, extra.backstory ].filter(Boolean).join("\n\n")),
-        section("ความสัมพันธ์กับผู้ใช้", [
-            `- ตอนนี้เป็น: ${RELATIONS[spec.relation].label}`,
-            spec.howMet && `- รู้จักกันจาก: ${spec.howMet}`,
-            `- แชทนี้: ${spec.firstChat}`,
-        ].filter(Boolean).join("\n")),
         "",
         "## จังหวะการตอบ",
         "> ระบบใช้ตัวเลขสามบรรทัดนี้กำหนดว่าตอบช้าหรือเร็ว (ร่วมกับอารมณ์และความสนิท)",
@@ -264,6 +271,7 @@ export async function renderAll(spec, extra = {}) {
     const [ style, memory, people, state, opinions ] = await Promise.all([ "style", "memory", "people", "state", "opinions" ].map(template));
     return {
         persona: renderPersona(spec, extra),
+        relation: renderRelation(spec),
         style: renderStyle(spec, style, extra),
         memory: renderMemory(spec, memory),
         people: renderPeople(spec, people),
@@ -277,17 +285,19 @@ export async function renderAll(spec, extra = {}) {
  * "ให้ AI ช่วยเติมรายละเอียด" is ticked; if it fails, the character is still made from the form.
  * @returns {Promise<{ id: string, name: string, filled: boolean }>}
  */
-export async function buildCharacter(raw, ask) {
+export async function buildCharacter(raw, ask, { owner = "", isPublic = false } = {}) {
     const spec = cleanSpec(raw);
     let extra = {};
     if (spec.useAI && ask) extra = await fillIn(spec, ask).catch((err) => (console.error("  ⚠ เติมรายละเอียดตัวละครไม่สำเร็จ:", err?.message ?? err), {}));
     const files = await renderAll(spec, extra);
-    const id = await createProfile({ name: spec.name });
-    const dir = path.join(PERSONAS_DIR, id);
-    for (const [ name, text ] of Object.entries(files)) {
-        const file = path.join(dir, `${name}.md`);
-        await withFileLock(file, () => writeAtomic(file, text));
-    }
+    const id = await createProfile({ name: spec.name, owner, isPublic });
+    // Her own files go in her folder, the relationship ones (memory, mood, how you met) in the creator's chat
+    await pinProfile(async () => {
+        for (const [ name, text ] of Object.entries(files)) {
+            const file = fileOf(name);
+            await withFileLock(file, () => writeAtomic(file, text));
+        }
+    }, id, owner);
     const filled = Object.values(extra).some((v) => (Array.isArray(v) ? v.length : Boolean(v)));
     return { id, name: spec.name, filled };
 }

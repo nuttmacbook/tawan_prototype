@@ -1,5 +1,4 @@
 import http from "node:http";
-import crypto from "node:crypto";
 import { readFile, stat, rm } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -13,14 +12,16 @@ try {
 process.on("unhandledRejection", (err) => console.error("unhandled:", err?.stack ?? err));
 
 const {
-    chat, greet, nudge, warmUp, resetSession, personaName, brainMode, consolidateHistory, compactMemory, hasApiKey, presence,
-    addReaction, awayPing, switchExclusive, forgetSession, noteUnsent, promptStats, cutLastReply, complete, afterthought, cancelAfterthought,
+    chat, greet, nudge, resetSession, personaName, brainMode, consolidateHistory, compactMemory, hasApiKey, presence,
+    addReaction, awayPing, switchExclusive, forgetSession, noteUnsent, promptStats, cutLastReply, complete, afterthought, cancelAfterthought, onProfileSwitch,
 } = await import("./brain.js");
+const users = await import("./users.js");
+const dm = await import("./dm.js");
 const profiles = await import("./profiles.js");
 const away = await import("./away.js");
 const portable = await import("./portable.js");
 const push = await import("./push.js");
-const { handleAppIcon, PUBLIC_PATHS } = await import("./appicon.js");
+const { handleAppIcon } = await import("./appicon.js");
 const { planReply, clearActivity } = await import("./pacing.js");
 const logic = await import("./logic.js");
 const store = await import("./store.js");
@@ -43,6 +44,14 @@ const isLan = /^(1|true|yes)$/i.test(String(process.env.ALLOW_LAN ?? ""));
 
 // Characters must exist before any route reads their files
 await profiles.initProfiles();
+
+// A character with no owner (made before accounts, or at startup) belongs to the admin
+{
+    const admin = (await users.listUsers()).find((u) => u.role === "admin");
+    if (admin) {
+        for (const id of await profiles.adoptLegacy(admin.id)) await users.addChat(admin.id, id);
+    }
+}
 
 /* ------------------------------------ helpers */
 
@@ -82,7 +91,7 @@ async function ccStatus(force = false) {
 }
 
 async function statusPayload() {
-    const [ state, threads ] = await Promise.all([ loadState(), loadThreads() ]);
+    const [ state, threads, isOwner ] = await Promise.all([ loadState(), loadThreads(), profiles.isOwnerNow() ]);
     const stage = stageOf(state.closeness);
     return {
         moods: state.moods.map((m) => ({ name: m.name, value: Math.round(m.value * 10) / 10, base: m.base })),
@@ -92,7 +101,8 @@ async function statusPayload() {
         messages: state.messages,
         lastSeen: state.lastSeen == null ? "-" : agoText(Date.now() - state.lastSeen),
         threads,
-        prompt: promptStats(),
+        // How the prompt was built is the owner's debug view, not something every chatter sees
+        prompt: isOwner ? promptStats() : null,
     };
 }
 
@@ -204,15 +214,15 @@ async function replyToPending(ids, context = {}) {
     }
 }
 
-/** Someone is looking at this character's chat right now (a reply for another character still gets a push) */
+/** This user is looking at this character's chat right now (a reply for another character still gets a push) */
 const isWatching = () => away.isBeingViewed() && profiles.currentId() === profiles.getActiveId();
 
-/** Sends her message to subscribed phones when nobody is looking at the chat */
+/** Sends her message to this user's phones when they aren't looking at the chat */
 async function pushMessage(bubbles) {
     try {
         // A lock screen anyone can glance at: the setting can hide what she wrote
         const { pushPreview } = await config.getConfig();
-        await push.notifyAll({ title: await personaName(), body: pushPreview ? push.previewText(bubbles) : "ส่งข้อความมา 💬" });
+        await push.notifyAll({ title: await personaName(), body: pushPreview ? push.previewText(bubbles) : "ส่งข้อความมา 💬", user: profiles.currentUser() });
     } catch (err) {
         console.error("push failed:", err?.message ?? err);
     }
@@ -225,7 +235,7 @@ const clockOf = (t) => new Date(t).toLocaleTimeString("en-GB", { hour: "2-digit"
 
 /* ------------------------------------ automatic memory tidy */
 
-let isTidying = false;
+const tidying = new Set();
 
 /**
  * When memory.md gets long, merge and trim it once a day in the background,
@@ -233,13 +243,13 @@ let isTidying = false;
  */
 async function maybeTidyMemory() {
     const { autoTidyChars: AUTO_TIDY_CHARS } = await config.getConfig();
-    if (!AUTO_TIDY_CHARS || isTidying) return;
+    // The chat this reply belonged to, even if you've switched since
+    const id = profiles.currentKey();
+    if (!AUTO_TIDY_CHARS || tidying.has(id)) return;
     // Set before the first await, so two replies finishing together can't both start a tidy-up
-    isTidying = true;
+    tidying.add(id);
     try {
         if ((await store.readMemoryFile()).length < AUTO_TIDY_CHARS) return;
-        // The character this reply belonged to, even if you've switched since
-        const id = profiles.currentId();
         const today = new Date().toLocaleDateString("sv-SE");
         if ((await store.loadSettings())?.lastTidy?.[id] === today) return;
 
@@ -251,15 +261,80 @@ async function maybeTidyMemory() {
     } catch (err) {
         console.error("auto tidy failed:", err?.message ?? err);
     } finally {
-        isTidying = false;
+        tidying.delete(id);
     }
 }
+
+/* ------------------------------------ accounts and chats */
+
+/** The characters a user can open: ones they made, and public ones they added */
+async function botsOf(user) {
+    const rows = [];
+    for (const p of await profiles.listProfiles()) {
+        const meta = await profiles.botMeta(p.id);
+        const isOwner = meta.owner === user.id;
+        if (isOwner || (user.chats ?? []).includes(p.id)) rows.push({ ...p, isOwner, isPublic: meta.isPublic, owner: meta.owner });
+    }
+    return rows;
+}
+
+/** Which character this user has on screen; one they can still open, or none */
+async function activeBotOf(user) {
+    const bots = await botsOf(user);
+    return bots.find((b) => b.id === user.activeBot)?.id ?? bots[0]?.id ?? "";
+}
+
+/** Opens a chat for the user (making their files the first time) and puts it on their screen */
+async function openChat(user, id, { reset = false } = {}) {
+    await users.setActiveBot(user.id, id);
+    profiles.setActiveFor(user.id, id);
+    await profiles.pinProfile(async () => {
+        await profiles.prepareCurrent();
+        if (reset) await onProfileSwitch();
+        clearActivity();
+    }, id, user.id);
+}
+
+/** Names for a list of user ids, in the same order */
+async function peopleById(ids) {
+    const all = new Map((await users.listUsers()).map((u) => [ u.id, u ]));
+    return ids.map((id) => users.publicUser(all.get(id))).filter(Boolean);
+}
+
+/** Everything the chat list shows: characters and friends, with the latest from each friend */
+async function chatList(user) {
+    const fresh = (await users.getUser(user.id)) ?? user;
+    const bots = await botsOf(fresh);
+    const friends = [];
+    for (const f of await peopleById(fresh.friends ?? [])) {
+        const pair = dm.pairOf(fresh.id, f.id);
+        const last = await dm.lastDm(fresh.id, f.id).catch(() => null);
+        friends.push({ ...f, last: last ? { text: last.text.slice(0, 80), at: last.at, isMine: last.from === fresh.id } : null, unread: await dm.unreadCount(fresh.id, f.id, fresh.dmRead?.[pair] ?? 0).catch(() => 0) });
+    }
+    return {
+        bots: bots.map((b) => ({ id: b.id, name: b.name, isOwner: b.isOwner, isPublic: b.isPublic })),
+        friends,
+        incoming: await peopleById(fresh.incoming ?? []),
+        outgoing: await peopleById(fresh.outgoing ?? []),
+    };
+}
+
+/** The signed-in user as their own page sees them */
+const meOf = (u) => ({ ...users.publicUser(u), isAdmin: u.role === "admin" });
+
+/** Only the person who made the character on screen */
+async function requireOwner() {
+    if (!(await profiles.isOwnerNow())) throw Object.assign(new Error("เฉพาะคนที่สร้างตัวละครนี้"), { status: 403 });
+}
+
+const requireAdmin = (user) => {
+    if (user?.role !== "admin") throw Object.assign(new Error("เฉพาะผู้ดูแลระบบ"), { status: 403 });
+};
 
 /* ------------------------------------ routes */
 
 const routes = {
     // scripts/run.js asks this after a restart: if it fails, the new code is rolled back
-    "GET /api/health": async () => ({ ok: true, name: await personaName(), status: await statusPayload() }),
 
     "GET /api/bootstrap": async (_, url, req) => {
         // The log and the live number must match: a reply written while the log was being read
@@ -270,10 +345,19 @@ const routes = {
             seq = live.latestSeq();
             history = await store.todayEntries();
         }
+        const user = req.user;
+        // No character yet (a new account): the page shows how to make or find one
+        if (!profiles.currentId()) return { me: meOf(user), noBot: true, chats: await chatList(user), brain: await brainPayload(), isLocal: isLocal(req) };
+        await profiles.prepareCurrent();
+        const meta = await profiles.botMeta(profiles.currentId());
         return {
+            me: meOf(user),
+            isOwner: meta.owner === user.id,
+            isPublic: meta.isPublic,
+            chats: await chatList(user),
             name: await personaName(),
             profileId: profiles.getActiveId(),
-            profiles: await profiles.listProfiles(),
+            profiles: (await botsOf(user)).map((b) => ({ id: b.id, name: b.name, isOwner: b.isOwner })),
             brain: await brainPayload(),
             status: await statusPayload(),
             history,
@@ -286,17 +370,131 @@ const routes = {
             seq,
             liveBoot: live.BOOT,
             isLocal: isLocal(req),
-            lan: isLocal(req) ? await remoteInfo() : null,
+            lan: isLocal(req) && user.role === "admin" ? await remoteInfo() : null,
         };
     },
+
+    /* ---------- accounts */
+
+    "GET /api/me": async (_, __, req) => ({ me: meOf(req.user), chats: await chatList(req.user) }),
+
+    "POST /api/account/name": async (body, _, req) => ({ me: meOf(await users.updateProfile(req.user.id, { name: body?.name })) }),
+    "POST /api/account/password": async (body, _, req, res) => {
+        await users.changePassword(req.user.id, body?.old, body?.next);
+        // Every other device is signed out; this one gets a fresh cookie
+        res.setHeader("set-cookie", await users.sessionCookie(await users.getUser(req.user.id), { secure: isHttps(req) }));
+        return { ok: true };
+    },
+
+    "GET /api/admin/invite": async (_, __, req) => {
+        requireAdmin(req.user);
+        return { code: await users.inviteCode() };
+    },
+    "POST /api/admin/invite": async (_, __, req) => {
+        requireAdmin(req.user);
+        return { code: await users.inviteCode({ rotate: true }) };
+    },
+
+    /* ---------- chat list, finding people and characters */
+
+    "GET /api/chats": async (_, __, req) => chatList(req.user),
+
+    // People by name or @id, and public characters by name or id
+    "GET /api/explore": async (_, url, req) => {
+        const q = String(url.searchParams.get("q") ?? "").trim().slice(0, 40);
+        if (!q) return { people: [], bots: [] };
+        const me = (await users.getUser(req.user.id)) ?? req.user;
+        const people = (await users.searchUsers(q, { exclude: me.id })).map((u) => ({
+            ...users.publicUser(u),
+            status: me.friends.includes(u.id) ? "friend" : me.outgoing.includes(u.id) ? "requested" : me.incoming.includes(u.id) ? "incoming" : "",
+        }));
+        const needle = q.toLowerCase().replace(/^@/, "");
+        const bots = [];
+        for (const p of await profiles.listProfiles()) {
+            const meta = await profiles.botMeta(p.id);
+            if (!meta.isPublic && meta.owner !== me.id) continue;
+            if (!p.name.toLowerCase().includes(needle) && p.id !== needle) continue;
+            const owner = users.publicUser(await users.getUser(meta.owner));
+            bots.push({ id: p.id, name: p.name, owner, isOwner: meta.owner === me.id, hasChat: meta.owner === me.id || me.chats.includes(p.id) });
+        }
+        return { people, bots: bots.slice(0, 20) };
+    },
+
+    // Adding a public character you found: your own chat with her starts like meeting someone new
+    "POST /api/chats/add": async (body, _, req) => {
+        const id = String(body?.id ?? "");
+        const meta = await profiles.botMeta(id);
+        if (!meta.isPublic && meta.owner !== req.user.id) throw Object.assign(new Error("ตัวละครนี้เป็นแบบส่วนตัว"), { status: 403 });
+        await profiles.ensureChat(id, req.user.id);
+        await openChat(req.user, id);
+        return { id };
+    },
+
+    "POST /api/chats/remove": async (body, _, req) => {
+        const id = String(body?.id ?? "");
+        if ((await profiles.botMeta(id)).owner === req.user.id) throw new Error("ตัวละครที่สร้างเองลบได้จากเมนูลบ");
+        await users.removeChat(req.user.id, id);
+        return chatList(await users.getUser(req.user.id));
+    },
+
+    // Owner only: whether others can find her and start their own chat
+    "POST /api/profiles/visibility": async (body) => {
+        await requireOwner();
+        const meta = await profiles.setBotMeta(profiles.currentId(), { isPublic: body?.isPublic === true });
+        return { isPublic: meta.isPublic };
+    },
+
+    /* ---------- friends and chats between people */
+
+    "POST /api/friends/request": async (body, _, req) => {
+        const to = String(body?.id ?? "");
+        const result = await users.requestFriend(req.user.id, to);
+        live.publishToUser(to, { type: result === "friends" ? "friend" : "request", from: users.publicUser(req.user) });
+        if (result === "requested") notifyUser(to, "คำขอเป็นเพื่อน", `${req.user.name} (@${req.user.handle}) อยากเป็นเพื่อน`);
+        return { result, chats: await chatList(req.user) };
+    },
+    "POST /api/friends/answer": async (body, _, req) => {
+        const from = String(body?.id ?? "");
+        await users.answerFriend(req.user.id, from, body?.accept === true);
+        if (body?.accept === true) live.publishToUser(from, { type: "friend", from: users.publicUser(req.user) });
+        return chatList(req.user);
+    },
+    "POST /api/friends/remove": async (body, _, req) => {
+        await users.removeFriend(req.user.id, String(body?.id ?? ""));
+        return chatList(req.user);
+    },
+
+    "GET /api/dm": async (_, url, req) => {
+        const other = String(url.searchParams.get("with") ?? "");
+        if (!(await users.areFriends(req.user.id, other))) throw Object.assign(new Error("คุยได้เฉพาะเพื่อน"), { status: 403 });
+        const before = Number(url.searchParams.get("before") ?? 0) || Infinity;
+        const messages = await dm.readDm(req.user.id, other, { before });
+        await users.markDmRead(req.user.id, dm.pairOf(req.user.id, other));
+        return { messages, with: users.publicUser(await users.getUser(other)) };
+    },
+    "POST /api/dm/send": async (body, _, req) => {
+        const to = String(body?.to ?? "");
+        if (!(await users.areFriends(req.user.id, to))) throw Object.assign(new Error("คุยได้เฉพาะเพื่อน"), { status: 403 });
+        const message = await dm.sendDm(req.user.id, to, body?.text);
+        const event = { type: "dm", pair: dm.pairOf(req.user.id, to), message, from: users.publicUser(req.user) };
+        live.publishToUser(to, event);
+        live.publishToUser(req.user.id, event);
+        if (!away.isBeingViewed(to)) notifyUser(to, req.user.name, message.text.slice(0, 120));
+        await users.markDmRead(req.user.id, event.pair);
+        return { message };
+    },
+    "POST /api/dm/read": async (body, _, req) => {
+        const other = String(body?.with ?? "");
+        await users.markDmRead(req.user.id, dm.pairOf(req.user.id, other));
+        return { ok: true };
+    },
+
+    // This user's own news (friends' messages, requests), since a number
+    "GET /api/events/user": async (_, url, req) => live.eventsSince(url.searchParams.get("after"), live.userFeed(req.user.id)),
 
     /* ---------- one active device */
 
     // Local only (see LOCAL_ONLY): makes every link and cookie handed out so far stop working
-    "POST /api/remote/rotate": async () => {
-        await rotateKey();
-        return remoteInfo();
-    },
 
     "POST /api/presence/claim": async (body) => {
         away.claim(body?.clientId);
@@ -309,71 +507,84 @@ const routes = {
 
     "GET /api/push/key": async () => ({
         key: await push.publicKey(),
-        count: await push.subscriptionCount(),
+        count: await push.subscriptionCount(profiles.currentUser()),
         preview: (await config.getConfig()).pushPreview,
     }),
 
     /* ---------- app settings (were only in .env) */
 
     "GET /api/config": async () => ({ values: await config.getConfig(), fields: config.describeConfig() }),
-    "POST /api/config": async (body) => ({ values: await config.setConfig(body?.values ?? {}), fields: config.describeConfig() }),
+    // App-wide settings change everyone's characters, so only the admin
+    "POST /api/config": async (body, _, req) => {
+        requireAdmin(req.user);
+        return { values: await config.setConfig(body?.values ?? {}), fields: config.describeConfig() };
+    },
 
-    "POST /api/push/subscribe": async (body) => ({ count: await push.subscribe(body?.subscription, body?.label) }),
+    "POST /api/push/subscribe": async (body) => ({ count: await push.subscribe(body?.subscription, body?.label, profiles.currentUser()) }),
 
     "POST /api/push/unsubscribe": async (body) => {
-        await push.unsubscribe(body?.endpoint);
-        return { count: await push.subscriptionCount() };
+        await push.unsubscribe(body?.endpoint, profiles.currentUser());
+        return { count: await push.subscriptionCount(profiles.currentUser()) };
     },
 
     "POST /api/push/test": async () => ({
-        reached: await push.notifyAll({ title: await personaName(), body: "ทดสอบแจ้งเตือน 🔔" }),
+        reached: await push.notifyAll({ title: await personaName(), body: "ทดสอบแจ้งเตือน 🔔", user: profiles.currentUser() }),
     }),
 
     /* ---------- move, share and back up characters */
 
-    "POST /api/profiles/import": async (body) => {
+    "POST /api/profiles/import": async (body, _, req) => {
         const { id, name } = await portable.importProfile(body?.pack);
-        await switchExclusive(() => profiles.switchProfile(id), { reset: true });
-        clearActivity();
+        await openChat(req.user, id, { reset: true });
         return { id, name };
     },
 
-    "GET /api/backup": async () => portable.backupInfo(),
-    "POST /api/backup": async () => portable.backupAll(),
+    "GET /api/backup": async (_, __, req) => {
+        requireAdmin(req.user);
+        return portable.backupInfo();
+    },
+    "POST /api/backup": async (_, __, req) => {
+        requireAdmin(req.user);
+        return portable.backupAll();
+    },
 
     /* ---------- characters */
 
-    "GET /api/profiles": async () => ({ active: profiles.getActiveId(), profiles: await profiles.listProfiles() }),
+    "GET /api/profiles": async (_, __, req) => ({ active: profiles.getActiveId(), profiles: (await botsOf(req.user)).map((b) => ({ id: b.id, name: b.name, isOwner: b.isOwner })) }),
 
-    "POST /api/profiles/create": async (body) => {
-        const id = await profiles.createProfile({ name: body?.name, copyFrom: body?.copy ? profiles.getActiveId() : "" });
-        await switchExclusive(() => profiles.switchProfile(id), { reset: true });
-        clearActivity();
+    "POST /api/profiles/create": async (body, _, req) => {
+        // A copy takes her persona, style and lessons, so only of a character you made
+        if (body?.copy) await requireOwner();
+        const id = await profiles.createProfile({ name: body?.name, copyFrom: body?.copy ? profiles.currentId() : "", owner: req.user.id });
+        await openChat(req.user, id, { reset: true });
         return { id };
     },
 
     // The new-character form: files written from what you filled in, then she's the one on screen
-    "POST /api/profiles/build": async (body) => {
-        const made = await builder.buildCharacter(body?.spec ?? {}, complete);
-        await switchExclusive(() => profiles.switchProfile(made.id), { reset: true });
-        clearActivity();
+    "POST /api/profiles/build": async (body, _, req) => {
+        const made = await builder.buildCharacter(body?.spec ?? {}, complete, { owner: req.user.id, isPublic: body?.spec?.isPublic === true });
+        await openChat(req.user, made.id, { reset: true });
         return made;
     },
     // What the form would write, without creating anything (no AI)
     "POST /api/profiles/preview": async (body) => ({ files: await builder.renderAll(builder.cleanSpec(body?.spec ?? {})) }),
 
-    // Waits for a reply that is still being written, so it is saved to the character it belongs to
-    "POST /api/profiles/switch": async (body) => {
-        await switchExclusive(() => profiles.switchProfile(body?.id));
-        clearActivity();
-        return { id: profiles.getActiveId() };
+    // Work already running stays pinned to the chat it started in, so a reply is saved where it belongs
+    "POST /api/profiles/switch": async (body, _, req) => {
+        const id = String(body?.id ?? "");
+        if (!(await botsOf(req.user)).some((b) => b.id === id)) throw Object.assign(new Error("ไม่พบแชทนี้"), { status: 404 });
+        await openChat(req.user, id);
+        return { id };
     },
 
-    "POST /api/profiles/delete": async (body) => {
-        await profiles.deleteProfile(body?.id);
+    "POST /api/profiles/delete": async (body, _, req) => {
+        const id = String(body?.id ?? "");
+        if ((await profiles.botMeta(id)).owner !== req.user.id) throw Object.assign(new Error("ลบได้เฉพาะตัวละครที่สร้างเอง"), { status: 403 });
+        await profiles.deleteProfile(id);
+        await users.dropBotEverywhere(id);
         // A new character could get this id one day; she must not inherit anything from this one
-        forgetSession(String(body?.id ?? ""));
-        return { profiles: await profiles.listProfiles() };
+        forgetSession(id);
+        return { profiles: (await botsOf(await users.getUser(req.user.id))).map((b) => ({ id: b.id, name: b.name, isOwner: b.isOwner })) };
     },
 
     /* ---------- memory snapshots */
@@ -429,7 +640,8 @@ const routes = {
     "GET /api/status": statusPayload,
     "GET /api/brain": () => brainPayload(true),
 
-    "POST /api/brain": async (body) => {
+    "POST /api/brain": async (body, _, req) => {
+        requireAdmin(req.user);
         const mode = body?.mode === "api" ? "api" : "claude-code";
         await store.saveSettings({ brain: mode });
         return brainPayload();
@@ -520,7 +732,8 @@ const routes = {
     },
 
     // scripts/run.js starts the server again when it exits with this code
-    "POST /api/restart": async (body) => {
+    "POST /api/restart": async (body, _, req) => {
+        requireAdmin(req.user);
         if (!process.env.PERSONA_RUNNER) throw new Error("รีสตาร์ทจากหน้าเว็บได้เมื่อเปิดด้วย npm run dev เท่านั้น ตอนนี้ให้กด Ctrl+C แล้วเปิดใหม่เอง");
         if (body?.backupId) await logic.markRestart(body.backupId);
         setTimeout(() => process.exit(75), 300);
@@ -591,27 +804,108 @@ const routes = {
 };
 
 // Changing the system's code is only allowed from this computer, never from a phone on the network
-const LOCAL_ONLY = /^\/api\/(logic\/|restart|remote\/)/;
+const LOCAL_ONLY = /^\/api\/(logic\/|restart)/;
+// The system's code and the server itself: the admin only
+const ADMIN_ONLY = /^\/api\/(logic\/|restart|backup)/;
+// Teaching her, her files, her backups, the coach: the person who made the character on screen
+const OWNER_ONLY = new Set([
+    "GET /api/teachings", "POST /api/teach", "POST /api/teachings/delete", "POST /api/style/correct", "POST /api/style/samples",
+    "POST /api/remember", "POST /api/compact", "GET /api/file", "POST /api/file", "GET /api/snapshots", "POST /api/snapshots/create",
+    "POST /api/snapshots/restore", "GET /api/coach", "POST /api/coach/review", "POST /api/coach/decide", "POST /api/today/refresh",
+    "POST /api/reset", "POST /api/pacing/clear",
+]);
+// Fine with no chat open yet: everything about accounts, the chat list, and making or finding a character
+const NO_BOT_OK = /^\/api\/(me|bootstrap|chats|explore|friends|dm|events\/user|stream\/user|profiles\/(build|preview|import|switch)|profiles$|push\/|presence\/|account\/|admin\/|auth\/|logic\/|restart|config|brain|backup)/;
 
-// These change which character is active, so they must not be pinned to the old one
-const UNPINNED = new Set([ "/api/profiles/switch", "/api/profiles/create", "/api/profiles/build", "/api/profiles/import", "/api/snapshots/restore" ]);
+/** Signing in and signing up: the only API calls that work without an account */
+async function handleAuth(req, res, url) {
+    if (req.method === "GET" && url.pathname === "/api/auth/state") {
+        return send(res, 200, { hasUsers: await users.hasUsers(), me: users.publicUser(await users.userOf(req)) });
+    }
+    if (req.method !== "POST" || !isOwnPage(req)) return send(res, 403, { error: "คำขอนี้ไม่ได้มาจากหน้าแชทของแอป" });
+    if (url.pathname === "/api/auth/logout") {
+        res.setHeader("set-cookie", users.clearCookie(isHttps(req)));
+        return send(res, 200, { ok: true });
+    }
+    const ip = clientIp(req);
+    if (isBlocked(ip)) return send(res, 429, { error: "ลองผิดหลายครั้งเกินไป รอสักครู่แล้วลองใหม่" });
+    const body = await readBody(req, 20_000);
+    try {
+        let user;
+        if (url.pathname === "/api/auth/login") {
+            user = await users.login(body?.handle, body?.password);
+            if (!user) {
+                recordFailure(ip);
+                return send(res, 401, { error: "ไอดีหรือรหัสผ่านไม่ถูกต้อง" });
+            }
+        } else if (url.pathname === "/api/auth/register") {
+            const isFirst = !(await users.hasUsers());
+            user = await users.register(body ?? {}).catch((err) => {
+                recordFailure(ip);
+                throw err;
+            });
+            // The first account takes over everything made before accounts existed
+            if (isFirst) {
+                const adopted = await profiles.adoptLegacy(user.id);
+                for (const id of adopted) await users.addChat(user.id, id);
+                await push.adoptSubs(user.id);
+                const before = (await store.loadSettings())?.activePersona;
+                await users.setActiveBot(user.id, adopted.includes(before) ? before : adopted[0] ?? "");
+                if (adopted.length) console.log(`  👤 ${user.name} เป็นผู้ดูแลระบบ และได้ตัวละครเดิม ${adopted.length} ตัว`);
+            }
+        } else {
+            return send(res, 404, { error: "ไม่พบ" });
+        }
+        res.setHeader("set-cookie", await users.sessionCookie(user, { secure: isHttps(req) }));
+        return send(res, 200, { me: users.publicUser(user) });
+    } catch (err) {
+        return send(res, 400, { error: err?.message ?? String(err) });
+    }
+}
+
+/** Sends a notification to one user's phones (a friend's message or request) */
+async function notifyUser(user, title, body) {
+    try {
+        const { pushPreview } = await config.getConfig();
+        await push.notifyAll({ title, body: pushPreview ? body : "มีข้อความใหม่ 💬", tag: "persona-people", user });
+    } catch (err) {
+        console.error("push failed:", err?.message ?? err);
+    }
+}
 
 /**
- * Every other request works on the character that was active when it arrived, even if you
+ * Every request runs as its signed-in user, on the character they have on screen, even if they
  * switch characters while it's still running (a reply can take a minute).
  */
-const handleApi = (req, res, url) =>
-    UNPINNED.has(url.pathname) ? handleApiNow(req, res, url) : profiles.pinProfile(() => handleApiNow(req, res, url));
+async function handleApi(req, res, url) {
+    if (url.pathname.startsWith("/api/auth/")) return handleAuth(req, res, url);
+    const user = await users.userOf(req);
+    if (!user) return send(res, 401, { error: "ต้องเข้าสู่ระบบก่อน", needsLogin: true });
+    req.user = user;
+    let bot = await activeBotOf(user);
+    // A page names the chat it shows; it gets that chat's updates only if it's one of this user's
+    const asked = url.searchParams.get("profile");
+    if (asked && asked !== bot && (await botsOf(user)).some((b) => b.id === asked)) bot = asked;
+    else profiles.setActiveFor(user.id, bot);
+    return profiles.pinProfile(() => handleApiNow(req, res, url), bot || "", user.id);
+}
 
 async function handleApiNow(req, res, url) {
     if (!isLocal(req) && LOCAL_ONLY.test(url.pathname)) return send(res, 403, { error: "ใช้ได้เฉพาะบนคอมเครื่องนี้" });
+    if (ADMIN_ONLY.test(url.pathname) && req.user?.role !== "admin") return send(res, 403, { error: "เฉพาะผู้ดูแลระบบ" });
     // Anything that changes something must come from this app's own page (see isOwnPage)
     if (req.method !== "GET" && req.method !== "HEAD" && !isOwnPage(req)) {
         return send(res, 403, { error: "คำขอนี้ไม่ได้มาจากหน้าแชทของแอป" });
     }
+    if (!profiles.currentId() && !NO_BOT_OK.test(url.pathname)) return send(res, 409, { error: "ยังไม่มีแชท สร้างหรือค้นหาตัวละครก่อน", noBot: true });
+    if (OWNER_ONLY.has(`${req.method} ${url.pathname}`) && !(await profiles.isOwnerNow())) {
+        return send(res, 403, { error: "เฉพาะคนที่สร้างตัวละครนี้" });
+    }
 
+    // This user's own feed (friends' messages, requests)
+    if (req.method === "GET" && url.pathname === "/api/stream/user") return live.stream(req, res, live.userFeed(req.user.id));
     // A live stream stays open, so it skips the JSON routes too
-    if (req.method === "GET" && url.pathname === "/api/stream") return live.stream(req, res, url.searchParams.get("profile"));
+    if (req.method === "GET" && url.pathname === "/api/stream") return live.stream(req, res, profiles.currentKey());
 
     // Pictures are binary, so they skip the JSON routes
     if (req.method === "GET" && url.pathname.startsWith("/api/upload/")) {
@@ -623,12 +917,30 @@ async function handleApiNow(req, res, url) {
             return send(res, 404, { error: err?.message ?? "ไม่พบรูป" });
         }
     }
-    // A character file is a download, not JSON for the page
+    // Your own chat with the character on screen, as text: anyone can take that, it's theirs
+    if (req.method === "GET" && url.pathname === "/api/profiles/history") {
+        try {
+            const { name, text } = await portable.exportHistory(profiles.currentId());
+            res.writeHead(200, {
+                "content-type": "text/markdown; charset=utf-8",
+                "content-disposition": `attachment; filename="chat.md"; filename*=UTF-8''${encodeURIComponent(portable.historyFileName(name))}`,
+                "cache-control": "no-store",
+            });
+            return res.end(text);
+        } catch (err) {
+            return send(res, 400, { error: err?.message ?? String(err) });
+        }
+    }
+    // A character file is a download, not JSON for the page. Only of a character you made, and only
+    // with your own chat: someone else's character (or someone else's chat) never leaves this way
     if (req.method === "GET" && url.pathname === "/api/profiles/export") {
         try {
-            const pack = await portable.exportProfile(url.searchParams.get("id") || profiles.getActiveId(), {
+            const id = url.searchParams.get("id") || profiles.currentId();
+            if ((await profiles.botMeta(id)).owner !== req.user.id) return send(res, 403, { error: "ส่งออกได้เฉพาะตัวละครที่สร้างเอง (แชทของคุณโหลดเป็นไฟล์ข้อความได้)" });
+            const pack = await portable.exportProfile(id, {
                 mode: url.searchParams.get("mode") === "identity" ? "identity" : "full",
                 withImages: url.searchParams.get("images") === "1",
+                user: req.user.id,
             });
             const name = portable.exportFileName(pack);
             res.writeHead(200, {
@@ -662,10 +974,10 @@ async function handleApiNow(req, res, url) {
     if (!route) return send(res, 404, { error: "ไม่พบ" });
     try {
         const body = req.method === "POST" ? await readBody(req) : null;
-        send(res, 200, await route(body, url, req));
+        send(res, 200, await route(body, url, req, res));
     } catch (err) {
-        console.error(err);
-        send(res, 500, { error: err?.message ?? String(err) });
+        if (!err?.status) console.error(err);
+        send(res, err?.status ?? 500, { error: err?.message ?? String(err) });
     }
 }
 
@@ -679,26 +991,6 @@ const isKnownHost = makeHostCheck({
     extraHosts: String(process.env.ALLOWED_HOSTS ?? "").split(","),
 });
 
-/** A random key kept in settings; other devices open the link with ?key= once and get a cookie */
-async function accessKey() {
-    const settings = await store.loadSettings();
-    if (settings?.lanKey) return settings.lanKey;
-    return rotateKey();
-}
-
-/** New key: every phone and old link has to be opened again with the new link */
-async function rotateKey() {
-    const key = crypto.randomBytes(18).toString("base64url");
-    await store.saveSettings({ lanKey: key });
-    return key;
-}
-
-const sameKey = (a, b) => {
-    const x = Buffer.from(String(a ?? ""));
-    const y = Buffer.from(String(b ?? ""));
-    return x.length === y.length && x.length > 0 && crypto.timingSafeEqual(x, y);
-};
-
 /** The public tunnel address: PUBLIC_URL for a named tunnel, or the quick tunnel the runner started */
 async function tunnelUrl() {
     if (process.env.PUBLIC_URL) return process.env.PUBLIC_URL.replace(/\/+$/, "");
@@ -711,21 +1003,18 @@ async function tunnelUrl() {
 
 const TUNNEL_FILE = path.join(ROOT, "data", ".tunnel.json");
 
+/** Addresses other devices can open; everyone signs in there with their own account */
 async function remoteInfo() {
-    const key = await accessKey();
     const tunnel = await tunnelUrl();
     return {
         enabled: isLan || Boolean(tunnel),
         isTunnelOn: /^(1|true|yes)$/i.test(String(process.env.TUNNEL ?? "")) || Boolean(process.env.PUBLIC_URL),
-        tunnel: tunnel ? `${tunnel}/?key=${key}` : "",
-        urls: isLan ? lanAddresses().map((ip) => `http://${ip}:${PORT}/?key=${key}`) : [],
+        tunnel: tunnel ? `${tunnel}/` : "",
+        urls: isLan ? lanAddresses().map((ip) => `http://${ip}:${PORT}/`) : [],
     };
 }
 
-const cookieOf = (req, name) =>
-    String(req.headers.cookie ?? "").split(";").map((c) => c.trim().split("=")).find(([ k ]) => k === name)?.[1] ?? "";
-
-// Wrong keys from one address are limited, so the key can't be guessed by hammering the link
+// Wrong passwords (and invite codes) from one address are limited, so they can't be guessed by hammering
 const failures = new Map();
 const MAX_FAILURES = 20;
 const FAILURE_WINDOW_MS = 10 * 60000;
@@ -748,38 +1037,6 @@ const recordFailure = (ip) => {
         while (failures.size > MAX_TRACKED) failures.delete(failures.keys().next().value);
     }
 };
-
-/** @returns {Promise<boolean>} true when the request may continue */
-async function accessGate(req, res, url) {
-    if (isLocal(req)) return true;
-    // App name and icon only: phones fetch these for the home screen without sending the cookie
-    if (PUBLIC_PATHS.has(url.pathname)) return true;
-    const ip = clientIp(req);
-    if (isBlocked(ip)) {
-        res.writeHead(429, { "content-type": "text/plain; charset=utf-8" });
-        res.end("ลองผิดหลายครั้งเกินไป รอสักครู่แล้วลองใหม่");
-        return false;
-    }
-
-    const key = await accessKey();
-    const secure = isHttps(req) ? "; Secure" : "";
-    if (sameKey(url.searchParams.get("key"), key)) {
-        // Swap the key in the address bar for a cookie so it doesn't sit in browser history
-        res.writeHead(302, { location: "/", "set-cookie": `pk=${key}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax${secure}` });
-        res.end();
-        return false;
-    }
-    if (sameKey(cookieOf(req, "pk"), key)) return true;
-
-    recordFailure(ip);
-    if (url.pathname.startsWith("/api/")) {
-        send(res, 401, { error: "ต้องเปิดลิงก์ที่มีรหัสก่อน" });
-        return false;
-    }
-    res.writeHead(401, { "content-type": "text/html; charset=utf-8" });
-    res.end("<meta name=viewport content='width=device-width'><p style='font-family:sans-serif;padding:2rem'>เปิดลิงก์ที่มี ?key= จากเมนูบนคอมก่อนนะ (แตะชื่อตัวละคร → เปิดบนมือถือ)</p>");
-    return false;
-}
 
 /* ------------------------------------ static (production) */
 
@@ -816,7 +1073,7 @@ let vite = null;
 if (!isProd) {
     const { createServer } = await import("vite");
     // HMR off: editlogic may rewrite page files mid-run, and an auto reload would cut the page off
-    // Vite refuses unknown Host headers; tunnel addresses are allowed because accessGate checks the key first
+    // Vite refuses unknown Host headers; tunnel addresses are allowed because every API call needs a signed-in account
     const publicHost = process.env.PUBLIC_URL ? new URL(process.env.PUBLIC_URL).hostname : "";
     vite = await createServer({
         root: ROOT,
@@ -824,8 +1081,6 @@ if (!isProd) {
         appType: "spa",
     });
 }
-
-await warmUp();
 
 async function handleRequest(req, res) {
     let url;
@@ -839,7 +1094,8 @@ async function handleRequest(req, res) {
         res.writeHead(421, { "content-type": "text/plain; charset=utf-8" });
         return res.end("unknown host");
     }
-    if (!(await accessGate(req, res, url))) return;
+    // The page itself is open to anyone (it shows the sign-in screen); every API call checks the account
+    if (url.pathname === "/api/health") return send(res, 200, { ok: true });
     if (url.pathname.startsWith("/api/")) return handleApi(req, res, url);
     if (await handleAppIcon(req, res, url)) return;
     if (vite) return vite.middlewares(req, res);
@@ -857,6 +1113,12 @@ const server = http.createServer(async (req, res) => {
 });
 
 away.startAwayScheduler(awayPing, {
+    // Every chat gets its own check: the owner's, and everyone who added her and still has her in their list
+    users: async (bot) => {
+        const meta = await profiles.botMeta(bot);
+        const members = new Set((await users.listUsers()).filter((u) => u.id === meta.owner || u.chats.includes(bot)).map((u) => u.id));
+        return (await profiles.chatUsers(bot)).filter((id) => members.has(id));
+    },
     planReply,
     pending: store.loadPending,
     reply: (ids, context) => replyToPending(ids, context),
@@ -879,8 +1141,7 @@ server.listen(PORT, isLan ? "0.0.0.0" : "127.0.0.1", async () => {
         console.log("");
     }
     if (process.env.PUBLIC_URL) console.log(`  🌐 เปิดจากที่ไหนก็ได้: ${(await remoteInfo()).tunnel}\n`);
-    // The quick tunnel's address is printed by scripts/run.js; make sure the key it needs exists
-    await accessKey();
+    if (!(await users.hasUsers())) console.log("  👤 ยังไม่มีบัญชี: เปิดหน้าเว็บแล้วสมัคร บัญชีแรกเป็นผู้ดูแลระบบและได้ตัวละครเดิมทั้งหมด\n");
     console.log(`  สมอง: ${brain.mode === "api" ? `API key (${API_MODEL})` : `Claude ในเครื่อง (${CC_MODEL})`}`);
     if (brain.mode === "claude-code" && !brain.claudeCode.installed) console.log("  ⚠ ไม่พบ Claude Code ในเครื่อง — ติดตั้งก่อน หรือสลับไปใช้ API key ในหน้าเว็บ");
     else if (brain.mode === "claude-code" && !brain.claudeCode.loggedIn) console.log("  ⚠ Claude Code ยังไม่ได้ล็อกอิน — พิมพ์ claude ใน terminal เพื่อล็อกอินก่อน");

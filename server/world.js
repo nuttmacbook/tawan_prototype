@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { activeDir, currentId, loadSettings } from "./profiles.js";
+import { dataFileOf, currentId, loadSettings } from "./profiles.js";
 import { FILES, safeRead, today, splitSections, sectionTitle } from "./store.js";
 import { withFileLock, writeAtomic } from "./fsutil.js";
 import { askClaudeCode, askApiWithWeb, webSearchTool } from "./llm.js";
@@ -28,7 +28,7 @@ const DAY_KINDS = {
     moody: "อารมณ์ไม่ค่อยดีจากเรื่องของตัวเอง (งานพลาด เรื่องที่บ้าน เหนื่อยสะสม) ตอบห้วนกว่าปกติแต่ไม่ลงที่ผู้ใช้ ถ้าถามก็เล่า",
 };
 
-const lifeFile = () => path.join(activeDir(), "life.json");
+const lifeFile = () => dataFileOf("life");
 
 /** life.json: { city, stories, lastTry, today: { date, ...what the look-up found } } */
 export async function loadLife() {

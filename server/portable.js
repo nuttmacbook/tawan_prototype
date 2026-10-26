@@ -1,6 +1,6 @@
 import { mkdir, readFile, writeFile, readdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
-import { PERSONAS_DIR, MD_FILES, DATA_FILES, listProfiles, createProfile, loadSettings, saveSettings } from "./profiles.js";
+import { PERSONAS_DIR, MD_FILES, DATA_FILES, listProfiles, createProfile, loadSettings, saveSettings, pinProfile, currentUser, fileOf, dataFileOf, activeDir, chatUsers, splitRelation } from "./profiles.js";
 
 /* ------------------------------------ format */
 
@@ -37,55 +37,78 @@ const today = () => new Date().toLocaleDateString("sv-SE");
 /* ------------------------------------ export */
 
 /**
- * Packs one character into a portable object.
+ * Packs one character into a portable object: her files plus one user's chat with her.
  * @param {string} id
- * @param {{ mode?: "full" | "identity", withImages?: boolean }} options
+ * @param {{ mode?: "full" | "identity", withImages?: boolean, user?: string }} options
  *   full: everything (moving computers, backups) · identity: persona, style and lessons only (sharing)
+ *   user: whose chat goes in (default: the current user); other people's chats never do
  */
-export async function exportProfile(id, { mode = "full", withImages = false } = {}) {
-    const dir = path.join(PERSONAS_DIR, String(id ?? ""));
-    if (!/^[a-z0-9-]+$/.test(String(id ?? "")) || !(await stat(dir).catch(() => null))) throw new Error("ไม่พบตัวละครนี้");
+export async function exportProfile(id, { mode = "full", withImages = false, user = currentUser() } = {}) {
+    if (!/^[a-z0-9-]+$/.test(String(id ?? "")) || !(await stat(path.join(PERSONAS_DIR, String(id))).catch(() => null))) throw new Error("ไม่พบตัวละครนี้");
+    return pinProfile(async () => {
+        const isFull = mode !== "identity";
+        const files = {};
+        for (const name of isFull ? MD_FILES : IDENTITY_FILES) files[name] = await readText(fileOf(name));
 
-    const isFull = mode !== "identity";
-    const files = {};
-    for (const name of isFull ? MD_FILES : IDENTITY_FILES) files[name] = await readText(path.join(dir, `${name}.md`));
+        const pack = { format: FORMAT, version: VERSION, mode: isFull ? "full" : "identity", name: nameOf(files.persona), exportedAt: new Date().toISOString(), files };
+        if (!isFull) return pack;
 
-    const pack = { format: FORMAT, version: VERSION, mode: isFull ? "full" : "identity", name: nameOf(files.persona), exportedAt: new Date().toISOString(), files };
-    if (!isFull) return pack;
-
-    pack.history = {};
-    for (const f of (await listDir(path.join(dir, "history"))).filter((x) => DAY_FILE.test(x))) {
-        pack.history[f] = await readText(path.join(dir, "history", f));
-    }
-    for (const f of (await listDir(path.join(dir, "history", "archive"))).filter((x) => DAY_FILE.test(x))) {
-        pack.history[`archive/${f}`] = await readText(path.join(dir, "history", "archive", f));
-    }
-    const pending = await readText(path.join(dir, "pending.json"));
-    if (pending) pack.pending = pending;
-    // City, story arcs and goals, coach suggestions, your routine: without these a moved
-    // character would wake up in a new city with no goals
-    pack.data = {};
-    for (const name of DATA_FILES) {
-        const text = await readText(path.join(dir, `${name}.json`));
-        if (text) pack.data[name] = text;
-    }
-
-    if (withImages) {
-        pack.uploads = {};
-        for (const f of (await listDir(path.join(dir, "uploads"))).filter((x) => UPLOAD_FILE.test(x))) {
-            pack.uploads[f] = (await readFile(path.join(dir, "uploads", f))).toString("base64");
+        const dir = activeDir();
+        pack.history = {};
+        for (const f of (await listDir(path.join(dir, "history"))).filter((x) => DAY_FILE.test(x))) {
+            pack.history[f] = await readText(path.join(dir, "history", f));
         }
-    }
-    return pack;
+        for (const f of (await listDir(path.join(dir, "history", "archive"))).filter((x) => DAY_FILE.test(x))) {
+            pack.history[`archive/${f}`] = await readText(path.join(dir, "history", "archive", f));
+        }
+        const pending = await readText(path.join(dir, "pending.json"));
+        if (pending) pack.pending = pending;
+        // City, story arcs and goals, coach suggestions, your routine: without these a moved
+        // character would wake up in a new city with no goals
+        pack.data = {};
+        for (const name of DATA_FILES) {
+            const text = await readText(dataFileOf(name));
+            if (text) pack.data[name] = text;
+        }
+
+        if (withImages) {
+            pack.uploads = {};
+            for (const f of (await listDir(path.join(dir, "uploads"))).filter((x) => UPLOAD_FILE.test(x))) {
+                pack.uploads[f] = (await readFile(path.join(dir, "uploads", f))).toString("base64");
+            }
+        }
+        return pack;
+    }, String(id), user);
 }
 
 export const exportFileName = (pack) => `${safeFileName(pack?.name)}-${today()}${pack?.mode === "identity" ? "-ตัวตน" : ""}.persona.json`;
 
+/**
+ * One user's chat with a character as plain text, oldest day first. This is all someone who
+ * didn't make her can take away: their own conversation, not her.
+ * @returns {Promise<{ name: string, text: string }>}
+ */
+export async function exportHistory(id, user = currentUser()) {
+    return pinProfile(async () => {
+        const dir = activeDir();
+        const name = nameOf(await readText(fileOf("persona")));
+        const days = [
+            ...(await listDir(path.join(dir, "history", "archive"))).filter((x) => DAY_FILE.test(x)).map((f) => path.join(dir, "history", "archive", f)),
+            ...(await listDir(path.join(dir, "history"))).filter((x) => DAY_FILE.test(x)).map((f) => path.join(dir, "history", f)),
+        ].sort((a, b) => path.basename(a).localeCompare(path.basename(b)));
+        const parts = [ `# แชทกับ ${name}`, `> ส่งออกเมื่อ ${new Date().toLocaleString("th-TH")}`, "" ];
+        for (const file of days) parts.push(`## ${path.basename(file, ".md")}`, (await readText(file)).replace(/^#.*\n/, "").trim(), "");
+        return { name, text: `${parts.join("\n").trim()}\n` };
+    }, String(id), user);
+}
+
+export const historyFileName = (name) => `แชท-${safeFileName(name)}-${today()}.md`;
+
 /* ------------------------------------ import */
 
 /**
- * Creates a new character from an exported file. Never overwrites an existing one,
- * and only writes known file names, so a crafted file can't place files elsewhere.
+ * Creates a new character from an exported file, owned by the current user. Never overwrites an
+ * existing one, and only writes known file names, so a crafted file can't place files elsewhere.
  * @param {object | string} input parsed object or JSON text
  * @returns {Promise<{ id: string, name: string }>}
  */
@@ -103,46 +126,56 @@ export async function importProfile(input) {
     if (Number(pack.version) > VERSION) throw new Error("ไฟล์มาจากแอปเวอร์ชันใหม่กว่า อัปเดตแอปก่อน");
     if (typeof pack.files.persona !== "string" || !pack.files.persona.trim()) throw new Error("ไฟล์ไม่มีตัวตนของตัวละคร");
 
-    const id = await createProfile({});
-    const dir = path.join(PERSONAS_DIR, id);
-
-    for (const name of MD_FILES) {
-        const text = pack.files[name];
-        if (typeof text === "string" && text.trim()) await writeFile(path.join(dir, `${name}.md`), text);
+    const user = currentUser();
+    const id = await createProfile({ owner: user });
+    const files = { ...pack.files };
+    // A file from before accounts keeps how she knew you inside persona.md; that's your chat's now
+    if (user && !files.relation) {
+        const split = splitRelation(files.persona);
+        files.persona = split.persona;
+        if (split.relation) files.relation = split.relation;
     }
 
-    for (const [ key, text ] of Object.entries(pack.history ?? {})) {
-        const isArchive = key.startsWith("archive/");
-        const file = isArchive ? key.slice(8) : key;
-        if (!DAY_FILE.test(file) || typeof text !== "string") continue;
-        const target = path.join(dir, "history", ...(isArchive ? [ "archive" ] : []));
-        await mkdir(target, { recursive: true });
-        await writeFile(path.join(target, file), text);
-    }
+    await pinProfile(async () => {
+        const dir = activeDir();
+        for (const name of MD_FILES) {
+            const text = files[name];
+            if (typeof text === "string" && text.trim()) await writeFile(fileOf(name), text);
+        }
 
-    if (typeof pack.pending === "string") {
-        try {
-            if (Array.isArray(JSON.parse(pack.pending))) await writeFile(path.join(dir, "pending.json"), pack.pending);
-        } catch {}
-    }
+        for (const [ key, text ] of Object.entries(pack.history ?? {})) {
+            const isArchive = key.startsWith("archive/");
+            const file = isArchive ? key.slice(8) : key;
+            if (!DAY_FILE.test(file) || typeof text !== "string") continue;
+            const target = path.join(dir, "history", ...(isArchive ? [ "archive" ] : []));
+            await mkdir(target, { recursive: true });
+            await writeFile(path.join(target, file), text);
+        }
 
-    // Known names only, and each must be a JSON object, so a crafted file can't plant anything else
-    for (const name of DATA_FILES) {
-        const text = pack.data?.[name];
-        if (typeof text !== "string") continue;
-        try {
-            const value = JSON.parse(text);
-            if (value && typeof value === "object" && !Array.isArray(value)) await writeFile(path.join(dir, `${name}.json`), `${JSON.stringify(value, null, 1)}\n`);
-        } catch {}
-    }
+        if (typeof pack.pending === "string") {
+            try {
+                if (Array.isArray(JSON.parse(pack.pending))) await writeFile(path.join(dir, "pending.json"), pack.pending);
+            } catch {}
+        }
 
-    for (const [ file, b64 ] of Object.entries(pack.uploads ?? {})) {
-        if (!UPLOAD_FILE.test(file) || typeof b64 !== "string") continue;
-        await mkdir(path.join(dir, "uploads"), { recursive: true });
-        await writeFile(path.join(dir, "uploads", file), Buffer.from(b64, "base64"));
-    }
+        // Known names only, and each must be a JSON object, so a crafted file can't plant anything else
+        for (const name of DATA_FILES) {
+            const text = pack.data?.[name];
+            if (typeof text !== "string") continue;
+            try {
+                const value = JSON.parse(text);
+                if (value && typeof value === "object" && !Array.isArray(value)) await writeFile(dataFileOf(name), `${JSON.stringify(value, null, 1)}\n`);
+            } catch {}
+        }
 
-    return { id, name: nameOf(pack.files.persona) };
+        for (const [ file, b64 ] of Object.entries(pack.uploads ?? {})) {
+            if (!UPLOAD_FILE.test(file) || typeof b64 !== "string") continue;
+            await mkdir(path.join(dir, "uploads"), { recursive: true });
+            await writeFile(path.join(dir, "uploads", file), Buffer.from(b64, "base64"));
+        }
+    }, id, user);
+
+    return { id, name: nameOf(files.persona) };
 }
 
 /* ------------------------------------ backup to an outside folder */
@@ -170,8 +203,12 @@ export async function backupAll() {
 
     const profiles = await listProfiles();
     for (const p of profiles) {
-        const pack = await exportProfile(p.id, { mode: "full" });
-        await writeFile(path.join(dayDir, `${p.id}-${safeFileName(pack.name)}.persona.json`), JSON.stringify(pack));
+        // One file per chat: her files plus that one person's conversation with her
+        const users = await chatUsers(p.id);
+        for (const user of users.length ? users : [ "" ]) {
+            const pack = await exportProfile(p.id, { mode: "full", user });
+            await writeFile(path.join(dayDir, `${p.id}${user ? `-${user}` : ""}-${safeFileName(pack.name)}.persona.json`), JSON.stringify(pack));
+        }
     }
 
     const days = [];

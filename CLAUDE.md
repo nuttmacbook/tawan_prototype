@@ -11,7 +11,9 @@
   Tailwind v4 ธีมมืด slate/sky, คอมเมนต์ภาษาอังกฤษสั้น ๆ อธิบาย "ทำไม", ข้อความใน UI เป็นภาษาไทย
 - ป้องกันค่า undefined ด้วย optional chaining เสมอ ห้าม throw ตอน render
 - เขียนไฟล์ข้อมูลผ่าน `server/fsutil.js` เท่านั้น (`updateText()` หรือ `withFileLock()` + `writeAtomic()`) ห้ามอ่านแล้ว `writeFile` ตรง ๆ เพราะหลายงานแก้ไฟล์เดียวกันพร้อมกันได้ (ข้อความหาย, ไฟล์ครึ่ง ๆ ตอนไฟดับ)
-- งานที่ใช้เวลานานทำงานแบบ "ปักตัวละคร" (`pinProfile()` ใน `server/profiles.js`) path ไฟล์มาจาก `currentId()` ไม่ใช่ตัวที่เปิดอยู่ตอนนั้น · สลับตัวละครต้องผ่าน `switchExclusive()` ใน `server/brain.js`
+- งานที่ใช้เวลานานทำงานแบบ "ปักตัวละคร + ผู้ใช้" (`pinProfile(fn, bot, user)` ใน `server/profiles.js`) path ไฟล์มาจาก `currentId()` / `currentUser()` ไม่ใช่ตัวที่เปิดอยู่ตอนนั้น · ทุกคำขอ API ถูกปักกับผู้ใช้ที่ล็อกอินอยู่ใน `handleApi()` ของ `server/index.js`
+- หลายผู้ใช้: ไฟล์ของตัวละครเอง (`BOT_MD`: persona, style, teachings, today, diary, people, opinions + life.json) อยู่ใน `data/personas/<id>/` ส่วนความสัมพันธ์กับแต่ละคน (memory, state, threads, journal, dates, relation, history/, uploads/, pending.json, usage/coach.json) อยู่ใน `data/personas/<id>/chats/<userId>/` ใช้ `fileOf()` / `dataFileOf()` / `activeDir()` เสมอ ห้ามต่อ path เอง · map ที่เก็บของต่อแชทให้ใช้ `currentKey()` ไม่ใช่ `currentId()`
+- สิทธิ์: สอน แก้ไฟล์ จุดสำรอง โค้ช เฉพาะเจ้าของตัวละคร (`OWNER_ONLY`, `isOwnerNow()`) · editlogic รีสตาร์ท ค่าตั้งค่าแอป สมอง สำรองนอก เฉพาะผู้ดูแลระบบ (`ADMIN_ONLY`, `requireAdmin()`) · route ใหม่ที่แก้ตัวละครต้องใส่ใน `OWNER_ONLY` ด้วย
 - ค่าที่มาจากข้อมูล (ชื่อตัวละคร, id) ห้ามใส่ใน `onclick="fn('...')"` ให้ใส่ `data-*` แล้วอ่าน `this.dataset` แทน (`esc()` กันใน attribute ไม่ได้ เบราว์เซอร์ถอด `&#39;` กลับก่อนรัน JS)
 - ห้ามลบการตรวจ `isKnownHost()` / `isOwnPage()` ใน `server/gate.js` มันกันเว็บอื่นสั่งแก้โค้ดผ่านเบราว์เซอร์ของผู้ใช้
 - แก้ให้น้อยที่สุดเท่าที่ทำให้คำขอสำเร็จ แล้วสรุปเป็นภาษาไทยสั้น ๆ ว่าแก้ไฟล์ไหน อย่างไร
@@ -26,8 +28,13 @@
 | เลือกความจำ/สิ่งที่สอนที่ส่งให้สมอง, งบตัวอักษร | `server/recall.js` | `selectMemory()`, `selectTeachings()`, `CORE_TOPICS` |
 | ตัววัดขนาด prompt, token ที่ใช้ | `server/brain.js` (`contextFor()`, `promptStats()`) + `src/components/chat.js` (`promptMeter()`) | |
 | จัดระเบียบความจำอัตโนมัติ, ยกเลิกส่ง/แก้ไขข้อความ | `server/index.js` | `maybeTidyMemory()`, routes `/api/unsend`, `/api/edit` |
-| ส่งออก/นำเข้าตัวละคร, สำรองไปโฟลเดอร์นอก | `server/portable.js` | `exportProfile()`, `importProfile()` (ห้ามเขียนชื่อไฟล์ที่ไม่ผ่านการตรวจ), `backupAll()` · ไฟล์ .json ของตัวละคร (life/coach/usage) อยู่ใน `DATA_FILES` ของ `server/profiles.js` เพิ่มไฟล์ใหม่ที่นั่นเพื่อให้ไปกับจุดสำรองและไฟล์ส่งออกด้วย |
-| แจ้งเตือน Web Push | `server/push.js` + `public/sw.js` + `src/main.js` (`renderNotify()`) | ส่งเมื่อ `away.isBeingViewed()` เป็น false (หน้าซ่อนอยู่ หรือไม่ได้ beat เกิน `VIEW_STALE_MS`) |
+| บัญชีผู้ใช้, สมัคร/ล็อกอิน, รหัสเชิญ, คุกกี้ที่เซ็นแล้ว, เพื่อน | `server/users.js` (test: `test/accounts.test.js`) + `server/index.js` | `register()` (บัญชีแรกเป็น admin), `login()`, `sessionCookie()` / `userOf()`, `inviteCode()`, `requestFriend()`, `answerFriend()` · `handleAuth()` และ `handleApi()` ใน index.js · หน้าเว็บ `authScreen()` ใน `src/components/people.js` |
+| ตัวละครสาธารณะ/ส่วนตัว, เพิ่มแชทกับตัวละครของคนอื่น, ค้นหาคนและตัวละคร | `server/profiles.js` + `server/index.js` | `botMeta()` / `setBotMeta()` (`owner.json`), `ensureChat()`, `chatUsers()` · routes `/api/explore`, `/api/chats/*`, `/api/profiles/visibility` · หน้าเว็บ `chatListMenu()`, `peopleBody()` |
+| ย้ายข้อมูลเดิมเข้าบัญชีแรก | `server/profiles.js` | `adoptLegacy()`, `splitRelation()` (ย้ายหัวข้อ "ความสัมพันธ์กับผู้ใช้" จาก persona.md ไป relation.md ของแชทนั้น) |
+| ตัวละครรู้จักคนอื่นที่คุยกับเธอ ("รู้จัก B มั้ย") | `server/circle.js` + `server/brain.js` | `othersNote()`, `factsOf()`, `thisUserNote()` · `<relationship>`, `<other_people_you_chat_with>` ใน `nowPrompt` (ยังไม่มีการตั้งค่าความเป็นส่วนตัว) |
+| แชทระหว่างคนกับคน | `server/dm.js` + `server/index.js` + `src/main.js` | `sendDm()`, `readDm()`, routes `/api/dm*`, feed ของผู้ใช้ `/api/stream/user` (`live.publishToUser()`) · หน้าเว็บ `openDm()`, `applyUserEvent()` |
+| ส่งออก/นำเข้าตัวละคร, สำรองไปโฟลเดอร์นอก | `server/portable.js` | `exportProfile()` (เฉพาะเจ้าของ และมีแค่แชทของตัวเอง), `exportHistory()` (ทุกคนโหลดประวัติแชทของตัวเองได้), `importProfile()` (ห้ามเขียนชื่อไฟล์ที่ไม่ผ่านการตรวจ), `backupAll()` (ไฟล์ละแชท) · ไฟล์ .json ของตัวละคร (life/coach/usage) อยู่ใน `DATA_FILES` ของ `server/profiles.js` เพิ่มไฟล์ใหม่ที่นั่นเพื่อให้ไปกับจุดสำรองและไฟล์ส่งออกด้วย |
+| แจ้งเตือน Web Push | `server/push.js` + `public/sw.js` + `src/main.js` (`renderNotify()`) | ส่งเฉพาะเครื่องของผู้ใช้คนนั้น (`subscribe(sub, label, user)`, `notifyAll({ user })`) เมื่อ `away.isBeingViewed(user)` เป็น false (หน้าซ่อนอยู่ หรือไม่ได้ beat เกิน `VIEW_STALE_MS`) |
 | อัปเดตสด: ข้อความที่เธอส่งตอนหน้าเว็บซ่อน/จอล็อก หรือทักมาเอง ขึ้นในหน้าที่เปิดอยู่ทันที | `server/live.js` (test: `test/live.test.js`) + `src/main.js` | `publish()`, `eventsSince()`, `stream()` · routes `/api/stream` (SSE), `/api/events` · หน้าเว็บ `applyLive()`, `catchUp()`, `tracked()` (ข้อความที่ตอบคำขอของหน้าเองไม่โชว์ซ้ำ) · `announce()` ใน `server/index.js` ต้องเรียกทุกที่ที่เธอพูด |
 | แชทวันก่อน ๆ | `server/store.js` (`previousDay()`) + `src/main.js` (`loadOlder()`) | |
 | หลายตัวละคร, สลับ/สร้าง/ลบ, จุดสำรองความจำ | `server/profiles.js` | `createProfile()`, `snapshot()`, `restoreSnapshot()` |
@@ -38,7 +45,7 @@
 | เก็บรีแอคชันในประวัติแชท (บรรทัด "รีแอค … โดย … ที่ข้อความ …" ใน log ของวันนั้น) | `server/store.js` | `logReaction()`, `parseEntries()` (คืน `reactions` ต่อ bubble) |
 | รูป, สติกเกอร์, ตอบกลับ, รีแอคชัน (ฝั่งหน้าเว็บ) | `src/components/chat.js` | `bubble()`, `parseMessage()`, `STICKERS`, `REACTIONS` |
 | ค้นหา, ดูรูปเต็ม, "เปิดอยู่ที่อื่น" | `src/components/overlays.js` | |
-| เข้าจากเครื่องอื่น (LAN, Cloudflare Tunnel), รหัสเข้า, กันเดารหัส | `server/index.js` + `server/gate.js` | `accessGate()`, `isLocal()`, `LOCAL_ONLY` — ห้ามทำให้คำขอผ่าน tunnel ถูกนับเป็น local |
+| เข้าจากเครื่องอื่น (LAN, Cloudflare Tunnel), กันเดารหัสผ่าน | `server/index.js` + `server/gate.js` | ทุก API ต้องล็อกอิน (`handleApi()`), `isBlocked()` / `recordFailure()`, `isLocal()`, `LOCAL_ONLY` — ห้ามทำให้คำขอผ่าน tunnel ถูกนับเป็น local |
 | กันเว็บอื่นยิงคำขอมาที่แอป (CSRF, DNS rebinding) | `server/gate.js` | `makeHostCheck()` (ชื่อ host ที่ยอมรับ, `ALLOWED_HOSTS`), `isOwnPage()` (POST ต้องเป็น JSON จากหน้าเดียวกัน) |
 | ล็อกไฟล์, เขียนไฟล์แบบไม่พังกลางทาง | `server/fsutil.js` | `withFileLock()`, `writeAtomic()`, `updateText()` |
 | ตอบข้อความเดียวกันซ้ำ / ตอบไม่สำเร็จแล้วลองใหม่ | `server/index.js` | `replyToPending()` (`inFlight` เก็บคำตอบที่กำลังเขียน) |

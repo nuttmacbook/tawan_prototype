@@ -8,6 +8,7 @@ import { logicPanel, logicEvent, backupList, logicWorking } from "./components/l
 import { esc } from "./components/ui.js";
 import { createEngine } from "./engine.js";
 import { builderPanel, BUILDER_EXAMPLE } from "./components/builder.js";
+import { authScreen, noChatCard, chatListMenu, peoplePanel, peopleBody, dmPanel, dmBubble } from "./components/people.js";
 
 /* ------------------------------------ state */
 
@@ -47,6 +48,13 @@ const state = {
     rethinkOnInterrupt: false,
     config: null,
     pushPreview: true,
+    // The signed-in user, and what they may do with the character on screen
+    me: null,
+    isOwner: false,
+    isPublic: false,
+    noBot: false,
+    chats: { bots: [], friends: [], incoming: [], outgoing: [] },
+    dmWith: null,
 };
 
 /** Browser storage can be blocked; preferences just fall back to defaults then */
@@ -74,16 +82,45 @@ function paint() {
     const app = document.getElementById("app");
     if (!app) return;
     document.documentElement.classList.toggle("full-role", state.isFullRole);
+    document.documentElement.classList.toggle("not-owner", !state.isOwner);
+    document.documentElement.classList.toggle("not-admin", !state.me?.isAdmin);
+    // A new account with no chat yet: make or find one
+    const main = state.noBot
+        ? noChatCard(state.me)
+        : `${header(state)}${chatPanel(state)}${teachPanel(state)}${logicPanel(state)}`;
     app.innerHTML = /*html*/`
         <div class="mx-auto flex h-full w-full max-w-6xl flex-col gap-3 px-4 py-3 sm:px-6 sm:py-5">
-            ${header(state)}
-            ${chatPanel(state)}
-            ${teachPanel(state)}
-            ${logicPanel(state)}
+            ${main}
         </div>
         ${overlays}
         ${builderPanel}
+        ${peoplePanel}
+        ${dmPanel}
     `;
+}
+
+/** The chat list in the header menu, and the badge for unread messages and friend requests */
+function renderChatList() {
+    const el = $("[data-chat-list]");
+    if (el) el.innerHTML = chatListMenu(state);
+    const count = (state.chats?.friends ?? []).reduce((n, f) => n + Number(f.unread ?? 0), 0) + (state.chats?.incoming?.length ?? 0);
+    const badge = $("[data-menu-badge]");
+    if (badge) {
+        badge.textContent = count > 9 ? "9+" : String(count);
+        badge.classList.toggle("hidden", !count);
+        badge.classList.toggle("grid", count > 0);
+    }
+}
+
+async function refreshChats() {
+    try {
+        state.chats = await api.chats();
+        renderChatList();
+        const body = $("[data-people-body]");
+        if (body && !$("[data-people]")?.classList.contains("hidden") && !$("[data-people-input]")?.value.trim()) {
+            body.innerHTML = peopleBody({ incoming: state.chats.incoming });
+        }
+    } catch {}
 }
 
 function renderStatus() {
@@ -301,6 +338,60 @@ function connectLive() {
     source.onopen = () => catchUp();
 }
 
+/* ------------------------------------ this user's own feed: friends' messages and requests */
+
+const userLive = { boot: "", seq: 0, source: null };
+
+function applyUserEvent(e) {
+    if (!e?.seq) return;
+    if (e.boot && e.boot !== userLive.boot) {
+        userLive.boot = e.boot;
+        userLive.seq = 0;
+    }
+    if (e.seq <= userLive.seq) return;
+    userLive.seq = e.seq;
+    if (e.type === "dm") {
+        const isOpen = state.dmWith && e.pair?.split("__").includes(state.dmWith.id);
+        if (isOpen) {
+            const list = $("[data-dm-messages]");
+            list?.querySelector("p.m-auto")?.remove();
+            if (!document.querySelector(`[data-dm-msg="${CSS.escape(e.message?.id ?? "")}"]`)) list?.insertAdjacentHTML("beforeend", dmBubble(e.message, state.me?.id));
+            const el = $("[data-dm-messages]");
+            if (el) el.scrollTop = el.scrollHeight;
+            if (e.message?.from !== state.me?.id) api.dmRead(state.dmWith.id).catch(() => {});
+        } else if (e.message?.from !== state.me?.id) {
+            notify(`${e.from?.name ?? ""}: ${e.message?.text ?? ""}`);
+        }
+    }
+    if (e.type === "request") notify(`${e.from?.name ?? ""} ขอเป็นเพื่อน`);
+    refreshChats();
+}
+
+async function catchUpUser() {
+    try {
+        const res = await api.userEvents(userLive.seq);
+        if (res?.boot && res.boot !== userLive.boot) {
+            userLive.boot = res.boot;
+            userLive.seq = 0;
+            return;
+        }
+        (res?.events ?? []).forEach(applyUserEvent);
+    } catch {}
+}
+
+function connectUserLive() {
+    if (typeof EventSource === "undefined") return;
+    userLive.source?.close();
+    const source = new EventSource("/api/stream/user");
+    userLive.source = source;
+    source.onmessage = (msg) => {
+        try {
+            applyUserEvent(JSON.parse(msg.data));
+        } catch {}
+    };
+    source.onopen = () => catchUpUser();
+}
+
 /** The engine's server calls, counted so live updates wait for their answers */
 const tracked = (fn) => async (...args) => {
     live.busy++;
@@ -376,6 +467,8 @@ setInterval(() => {
 if (typeof window !== "undefined") {
     window.switchTab = (id) => {
         if (state.isFullRole && id !== "chat") return;
+        // Teaching is the owner's, editlogic the admin's (the server says no too)
+        if ((id === "teach" && !state.isOwner) || (id === "logic" && !state.me?.isAdmin)) return;
         state.tab = id;
         document.querySelectorAll("[data-tab-panel]").forEach((el) => el.classList.toggle("hidden", el.dataset.tabPanel !== id));
         document.querySelectorAll("[data-tab-btn]").forEach((el) => el.setAttribute("aria-selected", String(el.dataset.tabBtn === id)));
@@ -391,6 +484,8 @@ if (typeof window !== "undefined") {
     };
 
     window.toggleFullRole = () => {
+        // Someone else's character is always a plain chat for you
+        if (!state.isOwner) return;
         state.isFullRole = !state.isFullRole;
         writePref("fullRole", state.isFullRole);
         document.documentElement.classList.toggle("full-role", state.isFullRole);
@@ -1357,6 +1452,7 @@ if (typeof window !== "undefined") {
             window.closePopovers();
             $("[data-image-viewer]")?.classList.add("hidden");
             $("[data-profile-menu]")?.classList.add("hidden");
+            window.closePeople?.();
         }
     });
 
@@ -1365,8 +1461,9 @@ if (typeof window !== "undefined") {
         const menu = $("[data-profile-menu]");
         menu?.classList.toggle("hidden");
         updateNotifyButton();
+        if (!menu?.classList.contains("hidden")) refreshChats();
         // The quick tunnel's address arrives a few seconds after start, so refresh it on open
-        if (state.isLocal && !menu?.classList.contains("hidden")) {
+        if (state.isLocal && state.me?.isAdmin && !menu?.classList.contains("hidden")) {
             try {
                 state.lan = (await api.bootstrap())?.lan ?? state.lan;
                 const body = $("[data-remote-body]");
@@ -1375,13 +1472,179 @@ if (typeof window !== "undefined") {
         }
     };
 
-    window.rotateKey = async () => {
-        if (!confirm("เปลี่ยนรหัส? มือถือและเครื่องอื่นที่เคยเปิดไว้จะเข้าไม่ได้จนกว่าจะเปิดลิงก์ใหม่")) return;
+    /* ---------- accounts (components/people.js) */
+
+    window.showAuth = (mode) => {
+        const app = document.getElementById("app");
+        if (app) app.innerHTML = authScreen({ hasUsers: state.hasUsers, mode });
+        $("[data-auth-form] input")?.focus();
+    };
+    window.submitAuth = async (e) => {
+        e?.preventDefault?.();
+        const form = e?.target;
+        const data = Object.fromEntries(new FormData(form).entries());
+        const btn = $("[data-auth-submit]");
+        const msg = $("[data-auth-msg]");
+        if (btn) btn.disabled = true;
         try {
-            state.lan = await api.rotateKey();
-            const body = $("[data-remote-body]");
-            if (body) body.innerHTML = remoteLinks(state.lan);
+            await (form?.dataset.mode === "register" ? api.register(data) : api.login(data.handle, data.password));
+            location.reload();
         } catch (err) {
+            if (msg) msg.textContent = err?.message ?? String(err);
+            if (btn) btn.disabled = false;
+        }
+    };
+    window.logout = async () => {
+        try {
+            await api.logout();
+        } catch {}
+        location.reload();
+    };
+    window.loadInvite = async () => {
+        try {
+            const el = $("[data-invite]");
+            if (el) el.textContent = (await api.invite()).code ?? "";
+        } catch {}
+    };
+    window.rotateInvite = async () => {
+        if (!confirm("เปลี่ยนรหัสเชิญ? รหัสเดิมจะใช้สมัครไม่ได้อีก (บัญชีที่สมัครแล้วยังใช้ได้)")) return;
+        try {
+            const el = $("[data-invite]");
+            if (el) el.textContent = (await api.rotateInvite()).code ?? "";
+        } catch (err) {
+            alert(err.message);
+        }
+    };
+
+    /* ---------- sharing, friends, finding (components/people.js) */
+
+    window.setPublic = async (isPublic) => {
+        try {
+            state.isPublic = (await api.setVisibility(isPublic)).isPublic === true;
+            await refreshChats();
+        } catch (err) {
+            alert(err.message);
+        }
+    };
+    window.removeChat = async (id, name) => {
+        if (!confirm(`เอา "${name}" ออกจากรายการแชท? (แชทเดิมยังเก็บไว้ เพิ่มกลับมาได้จากการค้นหา)`)) return;
+        try {
+            state.chats = await api.removeChat(id);
+            renderChatList();
+        } catch (err) {
+            alert(err.message);
+        }
+    };
+    window.openPeople = () => {
+        $("[data-profile-menu]")?.classList.add("hidden");
+        const el = $("[data-people]");
+        el?.classList.remove("hidden");
+        el?.classList.add("flex");
+        const body = $("[data-people-body]");
+        if (body) body.innerHTML = peopleBody({ incoming: state.chats?.incoming ?? [] });
+        $("[data-people-input]")?.focus();
+        refreshChats();
+    };
+    window.closePeople = () => {
+        const el = $("[data-people]");
+        el?.classList.add("hidden");
+        el?.classList.remove("flex");
+    };
+    let peopleTimer = null;
+    window.searchPeople = (q) => {
+        clearTimeout(peopleTimer);
+        peopleTimer = setTimeout(async () => {
+            const body = $("[data-people-body]");
+            if (!body) return;
+            if (!q.trim()) {
+                body.innerHTML = peopleBody({ incoming: state.chats?.incoming ?? [] });
+                return;
+            }
+            try {
+                body.innerHTML = peopleBody({ incoming: state.chats?.incoming ?? [], results: await api.explore(q), query: q });
+            } catch (err) {
+                body.innerHTML = `<p class="py-6 text-center text-sm text-rose-200">${esc(err.message)}</p>`;
+            }
+        }, 250);
+    };
+    const researchPeople = () => window.searchPeople($("[data-people-input]")?.value ?? "");
+    window.requestFriend = async (id) => {
+        try {
+            state.chats = (await api.requestFriend(id)).chats ?? state.chats;
+            renderChatList();
+            researchPeople();
+        } catch (err) {
+            alert(err.message);
+        }
+    };
+    window.answerFriend = async (id, accept) => {
+        try {
+            state.chats = await api.answerFriend(id, accept);
+            renderChatList();
+            researchPeople();
+        } catch (err) {
+            alert(err.message);
+        }
+    };
+    window.addChat = async (id) => {
+        try {
+            await api.addChat(id);
+            location.reload();
+        } catch (err) {
+            alert(err.message);
+        }
+    };
+
+    /* ---------- chat with a friend (components/people.js) */
+
+    const dmScroll = () => {
+        const el = $("[data-dm-messages]");
+        if (el) el.scrollTop = el.scrollHeight;
+    };
+    window.openDm = async (id) => {
+        $("[data-profile-menu]")?.classList.add("hidden");
+        window.closePeople();
+        const panel = $("[data-dm]");
+        const list = $("[data-dm-messages]");
+        if (!panel || !list) return;
+        try {
+            const data = await api.dm(id);
+            state.dmWith = data?.with ?? null;
+            const name = $("[data-dm-name]");
+            if (name) name.textContent = state.dmWith?.name ?? "";
+            const handle = $("[data-dm-handle]");
+            if (handle) handle.textContent = `@${state.dmWith?.handle ?? ""}`;
+            const av = $("[data-dm-avatar]");
+            if (av) av.textContent = Array.from(String(state.dmWith?.name ?? "?"))[0] ?? "?";
+            list.innerHTML = (data?.messages ?? []).map((m) => dmBubble(m, state.me?.id)).join("")
+                || `<p class="m-auto text-sm text-slate-500">ยังไม่มีข้อความ ทักไปก่อนเลย</p>`;
+            panel.classList.remove("hidden");
+            panel.classList.add("flex");
+            dmScroll();
+            $("[data-dm-input]")?.focus();
+            refreshChats();
+        } catch (err) {
+            alert(err.message);
+        }
+    };
+    window.closeDm = () => {
+        state.dmWith = null;
+        const panel = $("[data-dm]");
+        panel?.classList.add("hidden");
+        panel?.classList.remove("flex");
+        $("[data-chat-input]")?.focus();
+    };
+    window.sendDm = async (e) => {
+        e?.preventDefault?.();
+        const input = $("[data-dm-input]");
+        const text = input?.value.trim();
+        if (!text || !state.dmWith) return;
+        input.value = "";
+        try {
+            // The live feed shows it (to this tab and your other devices); nothing to add here
+            await api.sendDm(state.dmWith.id, text);
+        } catch (err) {
+            input.value = text;
             alert(err.message);
         }
     };
@@ -1408,6 +1671,7 @@ if (typeof window !== "undefined") {
         if (!form) return {};
         const spec = Object.fromEntries(new FormData(form).entries());
         spec.useAI = Boolean(form.useAI?.checked);
+        spec.isPublic = Boolean(form.isPublic?.checked);
         return spec;
     };
     const fillBuilder = (spec = {}) => {
@@ -1415,7 +1679,8 @@ if (typeof window !== "undefined") {
         if (!form) return;
         for (const el of form.elements) {
             if (!el.name) continue;
-            if (el.type === "checkbox") el.checked = spec[el.name] !== false;
+            // "ให้ AI ช่วย" starts on, "ให้คนอื่นค้นเจอ" starts off
+            if (el.type === "checkbox") el.checked = el.name === "isPublic" ? spec[el.name] === true : spec[el.name] !== false;
             else el.value = spec[el.name] ?? (el.tagName === "SELECT" ? el.options[0]?.value ?? "" : "");
         }
     };
@@ -1497,7 +1762,7 @@ if (typeof window !== "undefined") {
     };
 
     window.deleteProfile = async (id, name) => {
-        if (!confirm(`ลบ "${name}"? (ย้ายไปไว้ที่ data/.trash ยังกู้คืนเองได้)`)) return;
+        if (!confirm(`ลบ "${name}"? แชทของทุกคนกับตัวละครนี้ไปด้วย (ย้ายไปไว้ที่ data/.trash ยังกู้คืนเองได้)`)) return;
         try {
             state.profiles = (await api.deleteProfile(id)).profiles ?? [];
             location.reload();
@@ -1715,8 +1980,34 @@ if (typeof window !== "undefined") {
 /* ------------------------------------ boot */
 
 async function boot() {
+    // Signed in? If not, the sign-in screen (or the first account's sign-up)
+    try {
+        const auth = await api.authState();
+        state.hasUsers = auth?.hasUsers === true;
+        if (!auth?.me) return window.showAuth(state.hasUsers ? "login" : "register");
+    } catch (err) {
+        document.getElementById("app").innerHTML = /*html*/`
+            <div class="grid h-full place-items-center p-6 text-center">
+                <p class="max-w-sm text-sm text-rose-200">เชื่อมต่อเซิร์ฟเวอร์ไม่ได้: ${esc(err.message)}<br><span class="text-slate-400">ตรวจว่าเปิด npm run dev อยู่</span></p>
+            </div>`;
+        return;
+    }
     try {
         const data = await api.bootstrap();
+        state.me = data?.me ?? null;
+        state.chats = data?.chats ?? state.chats;
+        state.isOwner = data?.isOwner === true;
+        state.isPublic = data?.isPublic === true;
+        state.noBot = data?.noBot === true;
+        // Someone else's character is a plain chat: no debug notes, moods or teaching
+        if (!state.isOwner) state.isFullRole = true;
+        if (state.noBot) {
+            document.title = "Broker";
+            paint();
+            connectUserLive();
+            await initPush();
+            return;
+        }
         state.name = data?.name ?? "เพื่อน";
         state.brain = data?.brain ?? null;
         state.status = data?.status ?? null;
@@ -1763,8 +2054,10 @@ async function boot() {
         scrollDown(true);
         setPresence();
 
-        state.teachings = (await api.teachings()).teachings ?? [];
-        renderLessons();
+        if (state.isOwner) {
+            state.teachings = (await api.teachings()).teachings ?? [];
+            renderLessons();
+        }
     } catch (err) {
         document.getElementById("app").innerHTML = /*html*/`
             <div class="grid h-full place-items-center p-6 text-center">
@@ -1777,6 +2070,8 @@ async function boot() {
     await api.claim(state.clientId).catch(() => {});
     setInterval(heartbeat, 15000);
     connectLive();
+    connectUserLive();
+    renderChatList();
     await initPush();
     renderNotify();
 
