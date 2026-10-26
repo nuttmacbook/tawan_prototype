@@ -48,6 +48,12 @@ body {
     }
 }
 
+/* Teaching and debug views are the character owner's; editlogic and app settings the admin's */
+.not-owner [data-owner],
+.not-admin [data-admin] {
+    display: none !important;
+}
+
 /* Full role: hide everything that reveals the machinery (notes, moods, brain, tabs, timing) */
 .full-role [data-debug] {
     display: none !important;

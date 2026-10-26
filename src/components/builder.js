@@ -79,6 +79,11 @@ const builderPanel = /*html*/`
                 <span>ให้ AI ช่วยเติมรายละเอียด (นิสัยเพิ่ม ชีวิตประจำวัน กิจกรรมที่ทำให้ตอบช้า ความเห็น และตัวอย่างแชท) · ใช้เวลาราวหนึ่งนาที</span>
             </label>
 
+            <label class="flex items-start gap-2 rounded-xl bg-slate-950/40 p-3 text-sm text-slate-200 ring-1 ring-inset ring-white/5">
+                <input type="checkbox" name="isPublic" class="mt-1" />
+                <span>ให้คนอื่นค้นเจอและคุยกับตัวละครนี้ได้ (แต่ละคนมีแชทและความจำของตัวเอง สอนและแก้ได้เฉพาะคุณ) · เปลี่ยนทีหลังได้ในเมนูแชท</span>
+            </label>
+
             <pre class="scroll-slim hidden max-h-72 overflow-auto whitespace-pre-wrap rounded-xl bg-slate-950/70 p-3 text-xs text-slate-300" data-builder-preview></pre>
 
             <div class="flex flex-wrap items-center gap-2">

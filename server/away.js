@@ -1,6 +1,6 @@
 import { loadState } from "./mood.js";
 import { planReply } from "./pacing.js";
-import { loadSettings, saveSettings, currentId, pinProfile, getActiveId, listProfiles } from "./profiles.js";
+import { loadSettings, saveSettings, currentKey, currentUser, pinProfile, getActiveId, listProfiles, isOwnerNow } from "./profiles.js";
 import { getConfig } from "./config.js";
 import { maybeRefresh, dayKind } from "./world.js";
 import { maybeReview } from "./coach.js";
@@ -27,10 +27,16 @@ const MAX_UNANSWERED = 1 + FOLLOW_UP_HOURS.length;
 
 /* ------------------------------------ presence */
 
-// Only one tab or device holds the chat at a time; the others show "open elsewhere"
-const presence = { clientId: "", lastBeatAt: 0, isVisible: true };
+// Only one tab or device of each user holds the chat at a time; their others show "open elsewhere".
+// Each user has their own: one person looking at the app says nothing about anyone else.
+const presences = new Map();
+const presenceOf = (user = currentUser()) => {
+    if (!presences.has(user)) presences.set(user, { clientId: "", lastBeatAt: 0, isVisible: true });
+    return presences.get(user);
+};
 
 export function claim(clientId) {
+    const presence = presenceOf();
     presence.clientId = String(clientId ?? "").slice(0, 64);
     presence.lastBeatAt = Date.now();
     presence.isVisible = true;
@@ -38,6 +44,7 @@ export function claim(clientId) {
 
 /** @returns {boolean} whether this client still holds the chat */
 export function beat(clientId, isVisible = true) {
+    const presence = presenceOf();
     const id = String(clientId ?? "");
     if (!presence.clientId || Date.now() - presence.lastBeatAt > PAGE_CLOSED_AFTER_MS) presence.clientId = id;
     if (presence.clientId !== id) return false;
@@ -46,10 +53,16 @@ export function beat(clientId, isVisible = true) {
     return true;
 }
 
-/** Someone is looking at the chat right now; a push notification would only be noise */
-export const isBeingViewed = () => presence.isVisible && Date.now() - presence.lastBeatAt < VIEW_STALE_MS;
+/** This user is looking at the app right now; a push notification would only be noise */
+export const isBeingViewed = (user = currentUser()) => {
+    const presence = presenceOf(user);
+    return presence.isVisible && Date.now() - presence.lastBeatAt < VIEW_STALE_MS;
+};
 
-export const isActiveClient = (clientId) => !presence.clientId || presence.clientId === String(clientId ?? "");
+export const isActiveClient = (clientId) => {
+    const presence = presenceOf();
+    return !presence.clientId || presence.clientId === String(clientId ?? "");
+};
 
 /* ------------------------------------ scheduler */
 
@@ -63,8 +76,8 @@ const today = () => new Date().toLocaleDateString("sv-SE");
 const failures = new Map();
 
 async function answerWhileClosed({ planReply, pending, reply }) {
-    const failure = failures.get(currentId()) ?? { count: 0, until: 0 };
-    failures.set(currentId(), failure);
+    const failure = failures.get(currentKey()) ?? { count: 0, until: 0 };
+    failures.set(currentKey(), failure);
     if (Date.now() < failure.until) return false;
     const list = await pending();
     if (!list.length) return false;
@@ -133,14 +146,18 @@ export function startAwayScheduler(send, deps) {
     }, CHECK_EVERY_MS);
 
     /**
-     * Each character lives her own life: the one on screen waits while you have the chat open,
-     * but the others still read and answer what you left them, and may text you first.
-     * Each check is pinned, so it reads and writes only that character's files.
+     * Each character lives her own life, in a chat with each user: the one a user has on screen waits
+     * while they have it open, but the others still read and answer what they were left, and may text first.
+     * Each check is pinned, so it reads and writes only that chat's files.
      */
     async function everyCharacter() {
-        const active = getActiveId();
         for (const p of await listProfiles().catch(() => [])) {
-            await pinProfile(() => tick(p.id === active), p.id);
+            const users = deps?.users ? await deps.users(p.id).catch(() => []) : [];
+            // Without accounts there is one chat per character
+            if (!deps?.users) await pinProfile(() => tick(p.id === getActiveId()), p.id, "");
+            for (const user of users) {
+                await pinProfile(() => tick(p.id === getActiveId()), p.id, user);
+            }
         }
     }
 
@@ -148,7 +165,8 @@ export function startAwayScheduler(send, deps) {
         try {
             // Her morning look-up runs in the background (still pinned to her), even while you chat
             maybeRefresh();
-            maybeReview(complete);
+            // The coach's suggestions go to the person who can accept them: the owner, from their own chat
+            if (await isOwnerNow()) maybeReview(complete);
             // On screen right now: the page paces her replies. Hidden or locked: the server takes over,
             // so a reply isn't stuck in a frozen tab and you get the notification
             if (isOnScreen && isBeingViewed()) return;
@@ -163,7 +181,7 @@ export function startAwayScheduler(send, deps) {
             // 0 really means off (it used to fall back to 4 hours)
             if (!(AWAY_HOURS > 0) || !(MAX_PER_DAY > 0) || Math.random() > CHANCE_PER_CHECK) return;
 
-            const id = currentId();
+            const id = currentKey();
             const settings = await loadSettings();
             const log = settings?.awayPings?.[id] ?? {};
             const state = await loadState();

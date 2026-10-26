@@ -34,8 +34,10 @@ test("renderAll: the files read back the way the rest of the app expects", async
     assert.match(files.persona, /^- ชื่อ: ฟ้า$/m);
     assert.match(files.persona, /^- เมือง: เชียงใหม่$/m);
     // Her first message needs a reason to exist: friends who just swapped contacts by default
-    assert.match(files.persona, /^- แชทนี้: เพิ่งแลกช่องทางแชทกัน/m);
-    assert.match((await builder.renderAll(builder.cleanSpec({ ...FORM, firstChat: "พี่ขอไลน์เมื่อวาน" }))).persona, /^- แชทนี้: พี่ขอไลน์เมื่อวาน$/m);
+    // How you met is about the creator only, so it lives in their chat (relation.md), not in persona.md
+    assert.match(files.relation, /^- แชทนี้: เพิ่งแลกช่องทางแชทกัน/m);
+    assert.doesNotMatch(files.persona, /แชทนี้/);
+    assert.match((await builder.renderAll(builder.cleanSpec({ ...FORM, firstChat: "พี่ขอไลน์เมื่อวาน" }))).relation, /^- แชทนี้: พี่ขอไลน์เมื่อวาน$/m);
     assert.deepEqual(personaHabits(files.persona), { wakeHour: 7, sleepHour: 0, typingCps: 7 });
     assert.equal(parseActivities(files.persona).length, 3);
     assert.match(files.memory, /## เกี่ยวกับผู้ใช้\n- \[\d{4}-\d{2}-\d{2}\] ชอบอเมริกาโน่เย็น/);

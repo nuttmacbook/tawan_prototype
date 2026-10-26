@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { activeDir } from "./profiles.js";
+import { dataFileOf } from "./profiles.js";
 import { withFileLock, writeAtomic } from "./fsutil.js";
 
 /* ------------------------------------ looking out for you */
@@ -13,7 +13,7 @@ const LATE_UNTIL = 5;          // messages from midnight to 5am count as a late 
 const LATE_NIGHT_MSGS = 3;     // a few messages make it a late night, one doesn't
 const HEAVY_DAY_MSGS = 200;
 
-const usageFile = () => path.join(activeDir(), "usage.json");
+const usageFile = () => dataFileOf("usage");
 const dayOf = (t) => new Date(t).toLocaleDateString("sv-SE");
 
 export async function loadUsage() {

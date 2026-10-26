@@ -13,7 +13,6 @@ const TUNNEL_FILE = path.join(ROOT, "data", ".tunnel.json");
 // An empty config of our own: cloudflared otherwise loads ~/.cloudflared/config.yml, whose ingress rules
 // win over --url, so a leftover named-tunnel setup makes every page answer 404
 const TUNNEL_CONFIG = path.join(ROOT, "data", ".tunnel-config.yml");
-const SETTINGS_FILE = path.join(ROOT, "data", "settings.json");
 const RESTART_CODE = 75;
 const CRASH_WINDOW_MS = 10000;
 // New code must answer /api/health within this time, or it's rolled back like a crash
@@ -121,18 +120,6 @@ async function start() {
 
 /* ------------------------------------ Cloudflare quick tunnel */
 
-/** The server creates the access key on start; wait for it so the printed link works */
-async function waitForKey() {
-    for (let i = 0; i < 30; i++) {
-        try {
-            const key = JSON.parse(await readFile(SETTINGS_FILE, "utf8"))?.lanKey;
-            if (key) return key;
-        } catch {}
-        await new Promise((r) => setTimeout(r, 500));
-    }
-    return "";
-}
-
 /**
  * Runs `cloudflared tunnel --url http://localhost:PORT` and saves the random
  * https://….trycloudflare.com address it prints, so the page can show it.
@@ -156,8 +143,8 @@ async function startTunnel() {
         isAnnounced = true;
         await mkdir(path.dirname(TUNNEL_FILE), { recursive: true });
         await writeFile(TUNNEL_FILE, JSON.stringify({ url, at: Date.now() }));
-        const key = await waitForKey();
-        console.log(`\n  🌐 เปิดจากที่ไหนก็ได้ (ลิงก์นี้มีรหัส อย่าแชร์):\n     ${url}/?key=${key}\n`);
+        // Everyone signs in with their own account there; new people need the admin's invite code
+        console.log(`\n  🌐 เปิดจากที่ไหนก็ได้ (เข้าด้วยบัญชีของแต่ละคน):\n     ${url}/\n`);
     };
     tunnel.stdout.on("data", onOutput);
     tunnel.stderr.on("data", onOutput);

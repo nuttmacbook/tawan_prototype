@@ -393,7 +393,7 @@ export async function addStyleSamples(raw, { speaker = "" } = {}) {
 
 /* ------------------------------------ editable files */
 
-const EDITABLE = [ "persona", "style", "teachings", "memory", "state", "threads", "diary", "journal", "people", "today", "dates", "opinions" ];
+const EDITABLE = [ "persona", "style", "teachings", "memory", "state", "threads", "diary", "journal", "people", "today", "dates", "opinions", "relation" ];
 
 /** Only the known md files can be read or written from the web page */
 export async function readEditable(name) {
@@ -828,14 +828,15 @@ export async function appendJournal(date, summary) {
  * Reads the md files the persona is built from. Called each turn so manual edits apply immediately.
  */
 export async function loadTexts() {
-    const [ persona, teachings, memory, journal, style ] = await Promise.all([
+    const [ persona, teachings, memory, journal, style, relation ] = await Promise.all([
         safeRead(FILES.persona),
         safeRead(FILES.teachings),
         safeRead(FILES.memory),
         safeRead(FILES.journal),
         safeRead(FILES.style),
+        safeRead(FILES.relation),
     ]);
-    return { persona, teachings, memory, journal: lastSections(journal, 7), style };
+    return { persona, teachings, memory, journal: lastSections(journal, 7), style, relation };
 }
 
 export const readMemoryFile = () => safeRead(FILES.memory);

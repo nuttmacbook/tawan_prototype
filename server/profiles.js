@@ -7,10 +7,14 @@ import { withFileLock, writeAtomic, readText as readFileText } from "./fsutil.js
 /* ------------------------------------ layout */
 
 // data/
-// ├── personas/<id>/      one folder per character: md files, history/, uploads/
-// ├── .snapshots/<id>/    automatic and manual backups of a character's data
-// ├── .trash/             deleted characters (moved, never erased)
-// └── settings.json       brain, active character, phone key — shared by all characters
+// ├── personas/<id>/            one folder per character: who she is and her own life (BOT_MD, life.json, owner.json)
+// │   └── chats/<userId>/       her relationship with one user: memory, mood, history/, uploads/, pending…
+// ├── users.json                accounts, friends, which chats each user has (server/users.js)
+// ├── dm/                       chats between two real users (server/dm.js)
+// ├── .snapshots/<id>/users/<userId>/   backups of one relationship (plus her files at that moment)
+// ├── .trash/                   deleted characters (moved, never erased)
+// └── settings.json             brain, push keys, invite code — shared by everyone
+// Work without a user (tests, the old single-user layout) keeps everything in personas/<id>/ itself
 // PERSONA_DATA_DIR lets tests run against a scratch folder instead of your real characters
 const DATA_DIR = process.env.PERSONA_DATA_DIR
     ? `${path.resolve(process.env.PERSONA_DATA_DIR)}${path.sep}`
@@ -22,15 +26,22 @@ const TEMPLATE_DIR = fileURLToPath(new URL("./templates/", import.meta.url));
 const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
 const SETTINGS_BACKUP = path.join(DATA_DIR, "settings.json.bak");
 
-const MD_FILES = [ "persona", "style", "teachings", "memory", "state", "threads", "diary", "journal", "people", "today", "dates", "opinions" ];
+const MD_FILES = [ "persona", "style", "teachings", "memory", "state", "threads", "diary", "journal", "people", "today", "dates", "opinions", "relation" ];
+// Hers, the same whoever she talks to: who she is, how she types, what the owner taught her,
+// and her own life (her day, diary, people, opinions), so she tells everyone the same story
+const BOT_MD = new Set([ "persona", "style", "teachings", "today", "diary", "people", "opinions" ]);
+// Everything else (memory, mood, threads, journal, dates, relation) belongs to one relationship
 // What a copied character keeps; everything about the relationship starts fresh
 const IDENTITY_FILES = [ "persona", "style", "teachings" ];
 // Her life as the system keeps it (city, story arcs, goals; coach suggestions; your routine).
 // Not editable by hand, but part of her: snapshots and the portable file carry them too
 const DATA_FILES = [ "life", "coach", "usage" ];
+const BOT_DATA = new Set([ "life" ]);
 const KEEP_SNAPSHOTS = 30;
 
 let activeId = "";
+// Which character each user has on screen (kept in users.json; mirrored here by server/index.js)
+const activeByUser = new Map();
 
 /* ------------------------------------ helpers */
 
@@ -59,6 +70,14 @@ const nameOf = (persona) => String(persona ?? "").match(/ชื่อ\s*[:：]\s
 const safeId = (id) => {
     const clean = String(id ?? "");
     if (!/^[a-z0-9-]{1,40}$/.test(clean)) throw new Error("รหัสตัวละครไม่ถูกต้อง");
+    return clean;
+};
+
+// User ids are generated too (server/users.js)
+const USER_ID = /^u[a-z0-9]{6,24}$/;
+const safeUser = (user) => {
+    const clean = String(user ?? "");
+    if (!USER_ID.test(clean)) throw new Error("รหัสผู้ใช้ไม่ถูกต้อง");
     return clean;
 };
 
@@ -109,32 +128,121 @@ export function saveSettings(patch) {
 /* ------------------------------------ active character */
 
 // A reply can take a minute. If you switch characters meanwhile, everything that reply
-// writes must still land in the character it belongs to, so work runs "pinned" to one id.
+// writes must still land in the character (and the user) it belongs to, so work runs "pinned".
 const pinned = new AsyncLocalStorage();
 
+/** The user this piece of work is for ("" = no accounts: tests and the old layout) */
+export const currentUser = () => pinned.getStore()?.user ?? "";
+
+/** The character on screen for the current user */
+// A user never falls back to someone else's character
+export const getActiveId = () => (currentUser() ? activeByUser.get(currentUser()) ?? "" : activeId);
+
 /** The character this piece of work belongs to: the pinned one, or the one on screen */
-export const currentId = () => pinned.getStore() ?? activeId;
+export const currentId = () => pinned.getStore()?.bot ?? getActiveId();
+
+/** One relationship: maps keyed by this keep each user's chat with her apart */
+export const currentKey = () => (currentUser() ? `${currentId()}~${currentUser()}` : currentId());
 
 /**
- * Runs fn with every file path fixed to one character, whatever happens to the active one meanwhile.
+ * Runs fn with every file path fixed to one character and user, whatever happens to the active one meanwhile.
  * @template T
  * @param {() => Promise<T>} fn
  * @param {string} [id] defaults to the character active right now
+ * @param {string} [user] defaults to the current user
  * @returns {Promise<T>}
  */
-export const pinProfile = (fn, id = currentId()) => pinned.run(id, fn);
+export const pinProfile = (fn, id = currentId(), user = currentUser()) => pinned.run({ bot: id, user }, fn);
 
-export const activeDir = () => path.join(PERSONAS_DIR, currentId() || "_none");
-export const getActiveId = () => activeId;
-export const fileOf = (name) => path.join(activeDir(), `${name}.md`);
+/** For a user: work runs as them, on the character they have on screen */
+export const asUser = (user, fn) => pinned.run({ bot: activeByUser.get(user) ?? activeId, user }, fn);
+
+export const setActiveFor = (user, id) => {
+    if (user && id) activeByUser.set(user, id);
+};
+
+/** Her own folder */
+export const botDir = (id = currentId()) => path.join(PERSONAS_DIR, id || "_none");
+/** The current relationship's folder: history/, uploads/, pending.json, memory… */
+export const activeDir = () => (currentUser() ? path.join(botDir(), "chats", currentUser()) : botDir());
+export const chatDirOf = (id, user) => path.join(botDir(id), "chats", user);
+export const fileOf = (name) => path.join(BOT_MD.has(name) ? botDir() : activeDir(), `${name}.md`);
+export const dataFileOf = (name) => path.join(BOT_DATA.has(name) ? botDir() : activeDir(), `${name}.json`);
 
 /** Creates any missing md file from the templates, so a half-copied folder still works */
-async function fillMissing(dir) {
-    await mkdir(path.join(dir, "history"), { recursive: true });
-    for (const name of MD_FILES) {
+async function fillMissing(dir, names = MD_FILES) {
+    await mkdir(dir, { recursive: true });
+    if (names.some((n) => !BOT_MD.has(n))) await mkdir(path.join(dir, "history"), { recursive: true });
+    for (const name of names) {
         const file = path.join(dir, `${name}.md`);
         if (!(await exists(file))) await writeFile(file, await readText(path.join(TEMPLATE_DIR, `${name}.md`)));
     }
+}
+
+const CHAT_MD = MD_FILES.filter((n) => !BOT_MD.has(n));
+
+/** Her files, and the current user's chat with her, all there */
+async function fillCurrent() {
+    if (!currentUser()) return fillMissing(botDir());
+    await fillMissing(botDir(), [ ...BOT_MD ]);
+    await fillMissing(activeDir(), CHAT_MD);
+}
+
+/**
+ * A user's own chat with her: made from the templates the first time they talk.
+ * @param {string} id character
+ * @param {string} user
+ * @param {{ relation?: string }} [options] relation: how this user and she know each other (relation.md)
+ */
+export async function ensureChat(id, user, { relation = "" } = {}) {
+    const dir = chatDirOf(safeId(id), safeUser(user));
+    const isNew = !(await exists(dir));
+    await fillMissing(dir, CHAT_MD);
+    if (isNew && relation) await writeFile(path.join(dir, "relation.md"), relation);
+    return isNew;
+}
+
+/** Everyone who has a chat with her */
+export async function chatUsers(id) {
+    try {
+        return (await readdir(path.join(botDir(safeId(id)), "chats"), { withFileTypes: true }))
+            .filter((e) => e.isDirectory() && USER_ID.test(e.name))
+            .map((e) => e.name);
+    } catch {
+        return [];
+    }
+}
+
+/* ------------------------------------ owner and visibility */
+
+const metaFile = (id) => path.join(botDir(safeId(id)), "owner.json");
+
+/**
+ * Who made her and whether others can find her.
+ * @returns {Promise<{ owner: string, isPublic: boolean, createdAt: number }>}
+ */
+export async function botMeta(id) {
+    try {
+        const value = JSON.parse(await readFile(metaFile(id), "utf8"));
+        return { owner: String(value?.owner ?? ""), isPublic: value?.isPublic === true, createdAt: Number(value?.createdAt ?? 0) };
+    } catch {
+        return { owner: "", isPublic: false, createdAt: 0 };
+    }
+}
+
+export function setBotMeta(id, patch) {
+    const file = metaFile(id);
+    return withFileLock(file, async () => {
+        const next = { ...(await botMeta(id)), ...patch };
+        await writeAtomic(file, `${JSON.stringify(next, null, 1)}\n`);
+        return next;
+    });
+}
+
+/** The current user made the character this work is pinned to (no accounts: everyone is) */
+export async function isOwnerNow() {
+    if (!currentUser()) return true;
+    return (await botMeta(currentId())).owner === currentUser();
 }
 
 /**
@@ -170,7 +278,8 @@ export async function initProfiles() {
     else if (ids.length) activeId = ids[0];
     else activeId = await createProfile({ name: "เพื่อนใหม่" });
 
-    await fillMissing(activeDir());
+    // A character that belongs to someone keeps her chats under chats/ (see adoptLegacy)
+    await fillMissing(botDir(activeId), (await exists(path.join(botDir(activeId), "owner.json"))) ? [ ...BOT_MD ] : MD_FILES);
     await saveSettings({ activePersona: activeId });
     return activeId;
 }
@@ -197,10 +306,11 @@ export async function listProfiles() {
  * @param {{ name?: string, copyFrom?: string }} options copyFrom keeps identity, style and lessons of that character
  * @returns {Promise<string>} new id
  */
-export async function createProfile({ name = "", copyFrom = "" } = {}) {
+export async function createProfile({ name = "", copyFrom = "", owner = currentUser(), isPublic = false } = {}) {
     const id = newId();
     const dir = path.join(PERSONAS_DIR, id);
     await mkdir(dir, { recursive: true });
+    if (owner) await writeFile(path.join(dir, "owner.json"), `${JSON.stringify({ owner, isPublic: isPublic === true, createdAt: Date.now() }, null, 1)}\n`);
 
     if (copyFrom) {
         const source = path.join(PERSONAS_DIR, safeId(copyFrom));
@@ -209,7 +319,12 @@ export async function createProfile({ name = "", copyFrom = "" } = {}) {
             if (text) await writeFile(path.join(dir, `${file}.md`), text);
         }
     }
-    await fillMissing(dir);
+    if (owner) {
+        await fillMissing(dir, [ ...BOT_MD ]);
+        await ensureChat(id, owner);
+    } else {
+        await fillMissing(dir);
+    }
 
     const cleanName = String(name ?? "").trim().replace(/[\r\n]+/g, " ").slice(0, 40);
     if (cleanName) {
@@ -223,23 +338,36 @@ export async function createProfile({ name = "", copyFrom = "" } = {}) {
 export async function switchProfile(id) {
     const clean = safeId(id);
     if (!(await exists(path.join(PERSONAS_DIR, clean)))) throw new Error("ไม่พบตัวละครนี้");
+    // With accounts, each user switches only their own screen (users.json keeps it)
+    if (currentUser()) {
+        activeByUser.set(currentUser(), clean);
+        await pinProfile(fillCurrent, clean);
+        return clean;
+    }
     activeId = clean;
     await fillMissing(path.join(PERSONAS_DIR, clean));
     await saveSettings({ activePersona: clean });
     return clean;
 }
 
+/** Fills in anything missing for the current character and user (a chat opened for the first time) */
+export const prepareCurrent = () => fillCurrent();
+
 /** Moves a character to data/.trash so a mistaken delete can still be recovered by hand */
 export async function deleteProfile(id) {
     const clean = safeId(id);
-    if (clean === activeId) throw new Error("ลบตัวละครที่กำลังคุยอยู่ไม่ได้ สลับไปตัวอื่นก่อน");
+    if (clean === getActiveId()) throw new Error("ลบตัวละครที่กำลังคุยอยู่ไม่ได้ สลับไปตัวอื่นก่อน");
     await mkdir(TRASH_DIR, { recursive: true });
     await rename(path.join(PERSONAS_DIR, clean), path.join(TRASH_DIR, `${clean}-${stamp()}`));
 }
 
 /* ------------------------------------ snapshots */
 
-const snapRoot = () => path.join(SNAP_DIR, currentId());
+const snapRoot = () => (currentUser() ? path.join(SNAP_DIR, currentId(), "users", currentUser()) : path.join(SNAP_DIR, currentId()));
+// Snapshot folders start with their date; "users" (and anything else) isn't one
+const SNAP_ID = /^\d{4}-\d{2}-\d{2}/;
+// Her own files that change as she lives (not the owner's settings of who she is)
+const LIVED = new Set([ "today", "diary", "people", "opinions" ]);
 
 /**
  * Copies a history folder. Archived days never change once archived, so they are hard-linked
@@ -278,7 +406,7 @@ export async function snapshot(label = "", { keep = "" } = {}) {
         if (await exists(from)) await cp(from, path.join(dir, `${name}.md`));
     }
     for (const name of DATA_FILES) {
-        const from = path.join(activeDir(), `${name}.json`);
+        const from = dataFileOf(name);
         if (await exists(from)) await cp(from, path.join(dir, `${name}.json`));
     }
     if (await exists(path.join(activeDir(), "history"))) {
@@ -293,7 +421,7 @@ export async function snapshot(label = "", { keep = "" } = {}) {
 
 export async function listSnapshots() {
     try {
-        const ids = (await readdir(snapRoot(), { withFileTypes: true })).filter((e) => e.isDirectory()).map((e) => e.name);
+        const ids = (await readdir(snapRoot(), { withFileTypes: true })).filter((e) => e.isDirectory() && SNAP_ID.test(e.name)).map((e) => e.name);
         const rows = await Promise.all(ids.map(async (id) => ({ id, label: await readText(path.join(snapRoot(), id, "_label.txt")) })));
         return rows.sort((a, b) => b.id.localeCompare(a.id));
     } catch {
@@ -321,16 +449,21 @@ export async function restoreSnapshot(id) {
     // Through the same file locks as every other writer, so "remember" or a hand edit
     // arriving mid-restore can't interleave with it
     for (const n of MD_FILES) {
+        // Her own life goes on in everyone's chats; going back in one chat mustn't erase it for the others
+        if (currentUser() && LIVED.has(n)) continue;
         const from = path.join(dir, `${n}.md`);
         if (!(await exists(from))) continue;
-        const text = await readFileText(from);
+        let text = await readFileText(from);
+        // A snapshot from before accounts still has how she knew you inside persona.md
+        if (currentUser() && n === "persona") text = splitRelation(text).persona;
         await withFileLock(fileOf(n), () => writeAtomic(fileOf(n), text));
     }
     for (const n of DATA_FILES) {
+        if (currentUser() && BOT_DATA.has(n)) continue;
         const from = path.join(dir, `${n}.json`);
         if (!(await exists(from))) continue;
         const text = await readFileText(from);
-        const to = path.join(activeDir(), `${n}.json`);
+        const to = dataFileOf(n);
         await withFileLock(to, () => writeAtomic(to, text));
     }
     if (await exists(path.join(dir, "history"))) {
@@ -344,4 +477,81 @@ export async function restoreSnapshot(id) {
     return safety;
 }
 
-export { DATA_DIR, PERSONAS_DIR, MD_FILES, DATA_FILES };
+/* ------------------------------------ moving to accounts */
+
+const RELATION_HEADING = /^##\s*ความสัมพันธ์กับผู้ใช้\s*$/m;
+
+/** Takes the "ความสัมพันธ์กับผู้ใช้" section out of persona.md: it was about one user only */
+export function splitRelation(persona) {
+    const text = String(persona ?? "");
+    const m = RELATION_HEADING.exec(text);
+    if (!m) return { persona: text, relation: "" };
+    const rest = text.slice(m.index + m[0].length);
+    const next = rest.search(/^##\s/m);
+    const body = next < 0 ? rest : rest.slice(0, next);
+    return {
+        persona: `${text.slice(0, m.index)}${next < 0 ? "" : rest.slice(next)}`.replace(/\n{3,}/g, "\n\n").trimEnd() + "\n",
+        relation: `## ความสัมพันธ์กับผู้ใช้คนนี้\n${body.trim()}\n`,
+    };
+}
+
+const LEGACY_RELATION = [
+    "## ความสัมพันธ์กับผู้ใช้คนนี้",
+    "- รู้จักกันมาตั้งแต่ก่อนแล้ว คนนี้คือคนที่คุณคุยด้วยในแชทนี้มาตลอด (ดูความจำ ไดอารี่ และประวัติแชท)",
+    "",
+].join("\n");
+
+// Files and folders of a relationship that the old layout kept in the character's own folder
+const CHAT_THINGS = [ ...CHAT_MD.map((n) => `${n}.md`), "memory.backup.md", "history", "uploads", "pending.json", "usage.json", "coach.json" ];
+
+/**
+ * The first account takes over everything from before accounts: each character becomes theirs,
+ * her chat with "you" becomes their chat, and her backups move with it. Runs once per character.
+ * @returns {Promise<string[]>} characters moved
+ */
+// Two first sign-ups at once must not both move the same files
+let adopting = Promise.resolve();
+export function adoptLegacy(user) {
+    const run = adopting.then(() => adoptNow(user));
+    adopting = run.catch(() => {});
+    return run;
+}
+
+async function adoptNow(user) {
+    const owner = safeUser(user);
+    const moved = [];
+    for (const { id } of await listProfiles()) {
+        const dir = botDir(id);
+        if (await exists(path.join(dir, "owner.json"))) continue;
+        const chat = chatDirOf(id, owner);
+        await mkdir(chat, { recursive: true });
+        for (const name of CHAT_THINGS) {
+            const from = path.join(dir, name);
+            if ((await exists(from)) && !(await exists(path.join(chat, name)))) await rename(from, path.join(chat, name));
+        }
+        const personaFile = path.join(dir, "persona.md");
+        const { persona, relation } = splitRelation(await readText(personaFile));
+        if (relation) {
+            await copyFile(personaFile, path.join(dir, "persona.before-accounts.md")).catch(() => {});
+            await writeAtomic(path.join(chat, "relation.md"), relation);
+            await writeAtomic(personaFile, persona);
+        } else if (!(await exists(path.join(chat, "relation.md"))) || (await readText(path.join(chat, "relation.md"))) === (await readText(path.join(TEMPLATE_DIR, "relation.md")))) {
+            // Not "just found you in the app": this is the person she's been talking to all along
+            await writeAtomic(path.join(chat, "relation.md"), LEGACY_RELATION);
+        }
+        // Backups of this chat now live under the user
+        const snaps = path.join(SNAP_DIR, id);
+        for (const e of await readdir(snaps, { withFileTypes: true }).catch(() => [])) {
+            if (!e.isDirectory() || !SNAP_ID.test(e.name)) continue;
+            await mkdir(path.join(snaps, "users", owner), { recursive: true });
+            await rename(path.join(snaps, e.name), path.join(snaps, "users", owner, e.name)).catch(() => {});
+        }
+        await writeFile(path.join(dir, "owner.json"), `${JSON.stringify({ owner, isPublic: false, createdAt: Date.now() }, null, 1)}\n`);
+        await fillMissing(dir, [ ...BOT_MD ]);
+        await fillMissing(chat, CHAT_MD);
+        moved.push(id);
+    }
+    return moved;
+}
+
+export { DATA_DIR, PERSONAS_DIR, MD_FILES, DATA_FILES, BOT_MD, USER_ID };
