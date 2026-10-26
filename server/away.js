@@ -20,6 +20,10 @@ const VIEW_STALE_MS = 40000;
 // starting Claude every minute and burning through the quota
 const RETRY_BASE_MS = 2 * 60000;
 const RETRY_MAX_MS = 60 * 60000;
+// No answer yet: a friend texts once, asks again the next day, checks in once more, then waits.
+// Hours since her last unanswered text before each follow-up (the first one uses awayPingHours)
+const FOLLOW_UP_HOURS = [ 20, 44 ];
+const MAX_UNANSWERED = 1 + FOLLOW_UP_HOURS.length;
 
 /* ------------------------------------ presence */
 
@@ -90,9 +94,31 @@ async function answerWhileClosed({ planReply, pending, reply }) {
 }
 
 /**
+ * Whether she may text first now. Exported for tests.
+ * @param {{ log?: object, lastSeen: number | null, awayHours: number, maxPerDay: number, now?: number }} input
+ * @returns {null | { quietHours: number, unanswered: number, sinceLastMs: number | null, count: number }}
+ */
+export function pingDue({ log = {}, lastSeen, awayHours, maxPerDay, now = Date.now() }) {
+    if (lastSeen == null || !(awayHours > 0) || !(maxPerDay > 0)) return null;
+    const day = new Date(now).toLocaleDateString("sv-SE");
+    const count = log?.date === day ? Number(log?.count ?? 0) : 0;
+    if (count >= maxPerDay) return null;
+    const quietHours = (now - lastSeen) / 3600000;
+    if (quietHours < awayHours) return null;
+
+    const lastAt = Number(log?.lastAt ?? 0);
+    // Her texts since you last spoke; older logs without the counter had at most one
+    const unanswered = lastAt > lastSeen ? Math.max(1, Number(log?.unanswered ?? 1)) : 0;
+    if (unanswered >= MAX_UNANSWERED) return null;
+    const waitHours = unanswered ? Math.max(awayHours, FOLLOW_UP_HOURS[unanswered - 1]) : awayHours;
+    if (lastAt && now - lastAt < waitHours * 3600000) return null;
+    return { quietHours, unanswered, sinceLastMs: unanswered ? now - lastAt : null, count };
+}
+
+/**
  * Every minute: if the chat is closed, you've been quiet for hours, she's awake,
- * and she hasn't already texted without an answer, she may send you something.
- * @param {(hours: number) => Promise<{ bubbles: string[] }>} send the brain's awayPing
+ * she may send you something; unanswered, she follows up at most twice, a day or so apart.
+ * @param {(hours: number, info: { unanswered: number, sinceLastMs: number | null }) => Promise<{ bubbles: string[] }>} send the brain's awayPing
  * @param {{ planReply: Function, pending: Function, reply: Function }} [deps] used to answer messages left waiting
  */
 export function startAwayScheduler(send, deps) {
@@ -140,29 +166,21 @@ export function startAwayScheduler(send, deps) {
             const id = currentId();
             const settings = await loadSettings();
             const log = settings?.awayPings?.[id] ?? {};
-            const count = log.date === today() ? Number(log.count ?? 0) : 0;
-            if (count >= MAX_PER_DAY) return;
-
             const state = await loadState();
-            if (state.lastSeen == null) return;
-            const quietHours = (Date.now() - state.lastSeen) / 3600000;
-            if (quietHours < AWAY_HOURS) return;
-
-            // One unanswered text is enough; real friends don't keep texting into silence
-            if (Number(log.lastAt ?? 0) > state.lastSeen) return;
-            if (Date.now() - Number(log.lastAt ?? 0) < AWAY_HOURS * 3600000) return;
+            const due = pingDue({ log, lastSeen: state.lastSeen, awayHours: AWAY_HOURS, maxPerDay: MAX_PER_DAY });
+            if (!due) return;
 
             if ((await planReply({ texts: [] })).isAsleep) return;
             // Out all day or swamped: she isn't the one who texts first today
             if ([ "busy", "away", "moody" ].includes(await dayKind())) return;
 
-            const result = await send(quietHours);
+            const result = await send(due.quietHours, { unanswered: due.unanswered, sinceLastMs: due.sinceLastMs });
             if (!result?.bubbles?.length) return;
             // Without a typo she took back
             await deps?.onAgentMessage?.(result.bubbles.filter((_, i) => !(result.unsend ?? []).includes(i)));
             // Read again: other settings may have changed while she was writing
             await saveSettings((latest) => ({
-                awayPings: { ...(latest?.awayPings ?? {}), [id]: { date: today(), count: count + 1, lastAt: Date.now() } },
+                awayPings: { ...(latest?.awayPings ?? {}), [id]: { date: today(), count: due.count + 1, lastAt: Date.now(), unanswered: due.unanswered + 1 } },
             }));
             console.log(`  ✉ ${result.bubbles.join(" / ")}`);
         } catch (err) {

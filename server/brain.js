@@ -968,15 +968,27 @@ export function noteUnsent(text) {
     addNote(`[ระบบ: ผู้ใช้ยกเลิกข้อความที่คุณอ่านไปแล้ว: "${String(text ?? "").slice(0, 80)}" จะแซวหรือทำเป็นไม่เห็นก็ได้ตามนิสัย]`);
 }
 
+/** What she's told before texting first; a follow-up knows her last text is still unanswered */
+export function awayPingNote(hours, unanswered = 0, sinceLastMs = null) {
+    const gone = hours >= 36 ? `${Math.round(hours / 24)} วัน` : `${Math.round(hours)} ชั่วโมง`;
+    if (!unanswered) {
+        return `[ระบบ: ผู้ใช้ไม่ได้เปิดแชทมาประมาณ ${gone} ตอนนี้ไม่ได้อยู่ในแชท ถ้าตัวละครนึกถึงหรือมีเรื่องอยากเล่า ให้ส่งข้อความสั้น ๆ เหมือนทักหาเพื่อน (เล่าเรื่องในไดอารี่ ถามเรื่องค้าง หรือแค่ทักเล่น) ถ้าไม่มีเหตุให้ทักก็ไม่ต้องทัก]`;
+    }
+    const since = Math.max(1, Math.round(Number(sinceLastMs ?? 0) / 3600000));
+    const tone = unanswered >= 2
+        ? "หายไปนานผิดปกติแล้ว ทักสั้น ๆ แบบห่วงจริง ๆ ว่าโอเคไหม ไม่ต่อว่า ไม่ตื๊อ และบอกได้ว่าว่างเมื่อไหร่ค่อยตอบ"
+        : "ทักตามแบบเพื่อนที่สังเกตว่าเงียบไป (เช่นถามว่ายุ่งอยู่หรอ หรือเล่าเรื่องใหม่ของวันนี้) ห้ามพูดซ้ำข้อความเดิม และไม่ต้องทวงให้ตอบ";
+    return `[ระบบ: ผู้ใช้หายไปประมาณ ${gone} ข้อความที่คุณทักไปเมื่อ ${since} ชั่วโมงก่อนยังไม่ได้รับคำตอบ (ครั้งที่ ${unanswered}) ${tone} ปรับตามนิสัยและความสนิท]`;
+}
+
 /**
  * She messages first while the chat isn't open, like a text arriving on your phone.
  * @param {number} hours how long since you last talked
  */
-export const awayPing = (hours) =>
+export const awayPing = (hours, { unanswered = 0, sinceLastMs = null } = {}) =>
     withLock(async () => {
         await warm();
-        const result = await turn(
-            `[ระบบ: ผู้ใช้ไม่ได้เปิดแชทมาประมาณ ${Math.round(hours)} ชั่วโมง ตอนนี้ไม่ได้อยู่ในแชท ถ้าตัวละครนึกถึงหรือมีเรื่องอยากเล่า ให้ส่งข้อความสั้น ๆ เหมือนทักหาเพื่อน (เล่าเรื่องในไดอารี่ ถามเรื่องค้าง หรือแค่ทักเล่น) ถ้าไม่มีเหตุให้ทักก็ไม่ต้องทัก]`,
+        const result = await turn(awayPingNote(hours, unanswered, sinceLastMs),
             await callbackNote(CALLBACK_CHANCE.opener),
         );
         me.lastReply = null;
