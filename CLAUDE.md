@@ -32,7 +32,7 @@
 | แชทวันก่อน ๆ | `server/store.js` (`previousDay()`) + `src/main.js` (`loadOlder()`) | |
 | หลายตัวละคร, สลับ/สร้าง/ลบ, จุดสำรองความจำ | `server/profiles.js` | `createProfile()`, `snapshot()`, `restoreSnapshot()` |
 | ฟอร์มสร้างตัวละครใหม่ (กรอกข้อมูล → สร้างไฟล์ → เปิดแชทใหม่) | `server/builder.js` (test: `test/builder.test.js`) + `src/components/builder.js` + `src/main.js` | `cleanSpec()` (อายุขั้นต่ำ `MIN_AGE`), `renderPersona()` (บรรทัดที่ระบบอ่านต้องคงรูปแบบ), `FILL_SYSTEM`, `cleanExtra()` · routes `/api/profiles/build`, `/api/profiles/preview` · หน้าเว็บ `openBuilder()`, `buildCharacter()`, `BUILDER_EXAMPLE` |
-| ตัวละครทักมาตอนปิดแชท, ตอบข้อความที่ค้างตอนปิดแชท, แท็บ/เครื่องที่ใช้งานอยู่ | `server/away.js` | ค่าคงที่ด้านบน, `answerWhileClosed()`, `startAwayScheduler()` |
+| ตัวละครทักมาตอนปิดแชท, ทักซ้ำเมื่อผู้ใช้หายไปหลายวัน, ตอบข้อความที่ค้างตอนปิดแชท, แท็บ/เครื่องที่ใช้งานอยู่ | `server/away.js` (test: `test/away.test.js`) + `src/main.js` | ค่าคงที่ด้านบน, `pingDue()` (`FOLLOW_UP_HOURS`, `MAX_UNANSWERED`), `answerWhileClosed()`, `startAwayScheduler()` · ข้อความที่บอกเธอ `awayPingNote()` ใน `server/brain.js` · หน้าเว็บที่เปิดค้างโดยไม่มีใครแตะเกิน `LOOKING_IDLE_MS` นับว่าไม่มีคนดู (`isLooking()`) |
 | ข้อความที่ส่งแล้วแต่เธอยังไม่ตอบ (กันหายตอนรีเฟรช) | `server/store.js` + `server/index.js` | `addPending()`, `replyToPending()`, route `/api/send` |
 | รูป, สติกเกอร์, ตอบกลับ, รีแอคชัน (ฝั่งสมอง) | `server/brain.js` | `<chat_features>` ใน `stablePrompt`, `turn()`, `addReaction()` |
 | เก็บรีแอคชันในประวัติแชท (บรรทัด "รีแอค … โดย … ที่ข้อความ …" ใน log ของวันนั้น) | `server/store.js` | `logReaction()`, `parseEntries()` (คืน `reactions` ต่อ bubble) |

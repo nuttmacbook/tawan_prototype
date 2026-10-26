@@ -1103,11 +1103,24 @@ function notify(text) {
 
 /* ------------------------------------ one active tab or device */
 
+// A tab left open on a desktop stays "visible" for days; without input for a while
+// nobody is really looking, so the server may text first and send the push
+const LOOKING_IDLE_MS = 15 * 60000;
+let lastInputAt = Date.now();
+if (typeof window !== "undefined") {
+    for (const type of [ "pointerdown", "keydown", "wheel", "touchstart", "focus" ]) {
+        window.addEventListener(type, () => {
+            lastInputAt = Date.now();
+        }, { passive: true, capture: true });
+    }
+}
+const isLooking = () => !document.hidden && Date.now() - lastInputAt < LOOKING_IDLE_MS;
+
 async function heartbeat() {
     // No live stream (closed by the browser or a proxy): look for missed messages on each beat
     if (live.source?.readyState !== 1 && !document.hidden) catchUp();
     try {
-        const { isActive } = await api.beat(state.clientId, !document.hidden);
+        const { isActive } = await api.beat(state.clientId, isLooking());
         setElsewhere(!isActive);
     } catch {}
 }
@@ -1127,7 +1140,8 @@ function setElsewhere(isElsewhere) {
 // Tell the server right away when the chat is hidden or closed, so her next message becomes a push
 if (typeof document !== "undefined") {
     document.addEventListener("visibilitychange", () => {
-        if (state.clientId) api.beat(state.clientId, !document.hidden).catch(() => {});
+        if (!document.hidden) lastInputAt = Date.now();
+        if (state.clientId) api.beat(state.clientId, isLooking()).catch(() => {});
         // Back from a locked screen or another app: show what she said meanwhile
         if (!document.hidden) {
             catchUp();
