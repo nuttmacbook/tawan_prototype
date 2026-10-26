@@ -120,3 +120,14 @@ test("splitRelation: only the relationship section moves", () => {
     assert.match(relation, /^## ความสัมพันธ์กับผู้ใช้คนนี้\n- แชทนี้: x\n$/);
     assert.deepEqual(profiles.splitRelation("## ตัวตน\n"), { persona: "## ตัวตน\n", relation: "" });
 });
+
+test("a damaged accounts file never reads as 'no accounts yet'", async () => {
+    const file = path.join(process.env.PERSONA_DATA_DIR, "users.json");
+    const good = await readFile(file, "utf8");
+    await writeFile(file, "{ broken");
+    // The last good copy is used, so nobody becomes admin and nobody is wiped
+    assert.ok(await users.hasUsers());
+    assert.equal((await users.findByHandle("nutt"))?.role, "admin");
+    await writeFile(file, good);
+});
+

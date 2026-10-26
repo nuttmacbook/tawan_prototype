@@ -101,7 +101,7 @@ const chatListMenu = (state) => {
             <button type="button" data-debug onclick="createProfile(true)" class="w-full rounded-xl px-2 py-2 text-left text-sm text-slate-300 hover:bg-white/5">⧉ คัดลอกตัวนี้ (ไม่เอาความจำ)</button>
             <label class="flex cursor-pointer items-center gap-2 rounded-xl px-2 py-2 text-sm text-slate-300 hover:bg-white/5">
                 <input type="checkbox" ${state?.isPublic ? "checked" : ""} onchange="setPublic(this.checked)" />
-                <span>ให้คนอื่นค้นเจอและคุยกับ${esc(state?.name)}ได้</span>
+                <span>ให้คนอื่นค้นเจอและเพิ่มแชทกับ${esc(state?.name)}ได้ <span class="block text-[11px] text-slate-500">ปิดแล้วคนใหม่ค้นไม่เจอ คนที่เพิ่มไว้แล้วยังคุยต่อได้</span></span>
             </label>` : ""}
         <a href="/api/profiles/history" download class="block w-full rounded-xl px-2 py-2 text-left text-sm text-slate-300 hover:bg-white/5">⬇ โหลดประวัติแชทนี้</a>
         <div class="my-1 h-px bg-white/5"></div>

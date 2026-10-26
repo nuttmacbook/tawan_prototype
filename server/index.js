@@ -51,6 +51,8 @@ await profiles.initProfiles();
     if (admin) {
         for (const id of await profiles.adoptLegacy(admin.id)) await users.addChat(admin.id, id);
     }
+    // Which character each user had on screen, so background work knows before they come back
+    for (const u of await users.listUsers()) profiles.setActiveFor(u.id, u.activeBot);
 }
 
 /* ------------------------------------ helpers */
@@ -228,9 +230,29 @@ async function pushMessage(bubbles) {
     }
 }
 
-/** Message id → the reply currently being written for it */
-const inFlight = new Map();
-const unsendAfter = new Set();
+// Message ids come from the page, so they're kept per chat: someone else's id can't reach your reply
+const perChat = (make) => {
+    const all = new Map();
+    return () => {
+        const key = profiles.currentKey();
+        if (!all.has(key)) all.set(key, make());
+        return all.get(key);
+    };
+};
+const inFlightOf = perChat(() => new Map());
+const unsendOf = perChat(() => new Set());
+/** Message id → the reply currently being written for it (in the current chat) */
+const inFlight = {
+    get: (id) => inFlightOf().get(id),
+    has: (id) => inFlightOf().has(id),
+    set: (id, v) => inFlightOf().set(id, v),
+    delete: (id) => inFlightOf().delete(id),
+};
+const unsendAfter = {
+    has: (id) => unsendOf().has(id),
+    add: (id) => unsendOf().add(id),
+    delete: (id) => unsendOf().delete(id),
+};
 const clockOf = (t) => new Date(t).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
 
 /* ------------------------------------ automatic memory tidy */
@@ -288,10 +310,10 @@ async function activeBotOf(user) {
 async function openChat(user, id, { reset = false } = {}) {
     await users.setActiveBot(user.id, id);
     profiles.setActiveFor(user.id, id);
+    // Not clearActivity(): what she's busy with is hers, the same for everyone talking to her
     await profiles.pinProfile(async () => {
         await profiles.prepareCurrent();
         if (reset) await onProfileSwitch();
-        clearActivity();
     }, id, user.id);
 }
 
@@ -455,8 +477,8 @@ const routes = {
     },
     "POST /api/friends/answer": async (body, _, req) => {
         const from = String(body?.id ?? "");
-        await users.answerFriend(req.user.id, from, body?.accept === true);
-        if (body?.accept === true) live.publishToUser(from, { type: "friend", from: users.publicUser(req.user) });
+        const answered = await users.answerFriend(req.user.id, from, body?.accept === true);
+        if (answered && body?.accept === true) live.publishToUser(from, { type: "friend", from: users.publicUser(req.user) });
         return chatList(req.user);
     },
     "POST /api/friends/remove": async (body, _, req) => {
@@ -755,7 +777,8 @@ const routes = {
     "POST /api/nudge": async (body) => ({ ...pushIfAway(announce(await nudge(Number(body?.minutes ?? 15)))), status: await statusPayload() }),
 
     // What she said that this page hasn't shown yet (after a locked screen or a dropped connection)
-    "GET /api/events": async (_, url) => live.eventsSince(url.searchParams.get("after"), url.searchParams.get("profile")),
+    // The feed of the chat this request is pinned to (the page's ?profile= only picks among this user's own chats)
+    "GET /api/events": async (_, url) => live.eventsSince(url.searchParams.get("after"), profiles.currentKey()),
 
     "POST /api/reset": async () => {
         resetSession();
@@ -839,13 +862,15 @@ async function handleAuth(req, res, url) {
                 return send(res, 401, { error: "ไอดีหรือรหัสผ่านไม่ถูกต้อง" });
             }
         } else if (url.pathname === "/api/auth/register") {
-            const isFirst = !(await users.hasUsers());
-            user = await users.register(body ?? {}).catch((err) => {
+            // The first account becomes the admin and gets everything, so it can only be made on this computer,
+            // never by whoever reaches the tunnel or the Wi-Fi link first
+            if (!(await users.hasUsers()) && !isLocal(req)) return send(res, 403, { error: "บัญชีแรก (ผู้ดูแลระบบ) ต้องสมัครบนคอมที่เปิดเซิร์ฟเวอร์" });
+            user = await users.register(body ?? {}, { allowFirst: isLocal(req) }).catch((err) => {
                 recordFailure(ip);
                 throw err;
             });
-            // The first account takes over everything made before accounts existed
-            if (isFirst) {
+            // The first account takes over everything made before accounts existed (decided inside the users lock)
+            if (user.role === "admin") {
                 const adopted = await profiles.adoptLegacy(user.id);
                 for (const id of adopted) await users.addChat(user.id, id);
                 await push.adoptSubs(user.id);
@@ -956,7 +981,7 @@ async function handleApiNow(req, res, url) {
     if (req.method === "POST" && url.pathname === "/api/profiles/import") {
         try {
             const body = await readBody(req, 64_000_000);
-            return send(res, 200, await routes["POST /api/profiles/import"](body));
+            return send(res, 200, await routes["POST /api/profiles/import"](body, url, req, res));
         } catch (err) {
             return send(res, 400, { error: err?.message ?? String(err) });
         }

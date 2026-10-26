@@ -135,7 +135,8 @@ const pinned = new AsyncLocalStorage();
 export const currentUser = () => pinned.getStore()?.user ?? "";
 
 /** The character on screen for the current user */
-export const getActiveId = () => activeByUser.get(currentUser()) ?? activeId;
+// A user never falls back to someone else's character
+export const getActiveId = () => (currentUser() ? activeByUser.get(currentUser()) ?? "" : activeId);
 
 /** The character this piece of work belongs to: the pinned one, or the one on screen */
 export const currentId = () => pinned.getStore()?.bot ?? getActiveId();
@@ -365,6 +366,8 @@ export async function deleteProfile(id) {
 const snapRoot = () => (currentUser() ? path.join(SNAP_DIR, currentId(), "users", currentUser()) : path.join(SNAP_DIR, currentId()));
 // Snapshot folders start with their date; "users" (and anything else) isn't one
 const SNAP_ID = /^\d{4}-\d{2}-\d{2}/;
+// Her own files that change as she lives (not the owner's settings of who she is)
+const LIVED = new Set([ "today", "diary", "people", "opinions" ]);
 
 /**
  * Copies a history folder. Archived days never change once archived, so they are hard-linked
@@ -446,12 +449,17 @@ export async function restoreSnapshot(id) {
     // Through the same file locks as every other writer, so "remember" or a hand edit
     // arriving mid-restore can't interleave with it
     for (const n of MD_FILES) {
+        // Her own life goes on in everyone's chats; going back in one chat mustn't erase it for the others
+        if (currentUser() && LIVED.has(n)) continue;
         const from = path.join(dir, `${n}.md`);
         if (!(await exists(from))) continue;
-        const text = await readFileText(from);
+        let text = await readFileText(from);
+        // A snapshot from before accounts still has how she knew you inside persona.md
+        if (currentUser() && n === "persona") text = splitRelation(text).persona;
         await withFileLock(fileOf(n), () => writeAtomic(fileOf(n), text));
     }
     for (const n of DATA_FILES) {
+        if (currentUser() && BOT_DATA.has(n)) continue;
         const from = path.join(dir, `${n}.json`);
         if (!(await exists(from))) continue;
         const text = await readFileText(from);
@@ -501,7 +509,15 @@ const CHAT_THINGS = [ ...CHAT_MD.map((n) => `${n}.md`), "memory.backup.md", "his
  * her chat with "you" becomes their chat, and her backups move with it. Runs once per character.
  * @returns {Promise<string[]>} characters moved
  */
-export async function adoptLegacy(user) {
+// Two first sign-ups at once must not both move the same files
+let adopting = Promise.resolve();
+export function adoptLegacy(user) {
+    const run = adopting.then(() => adoptNow(user));
+    adopting = run.catch(() => {});
+    return run;
+}
+
+async function adoptNow(user) {
     const owner = safeUser(user);
     const moved = [];
     for (const { id } of await listProfiles()) {

@@ -19,12 +19,28 @@ const SESSION_DAYS = 60;
 
 const newUserId = () => `u${crypto.randomBytes(6).toString("hex")}`;
 
+const USERS_BACKUP = `${USERS_FILE}.bak`;
+
+async function parseUsers(file) {
+    const value = JSON.parse(await readFile(file, "utf8"));
+    if (!value || typeof value !== "object" || !value.users || typeof value.users !== "object") throw new Error("users.json เสีย");
+    return value;
+}
+
+/**
+ * A damaged file must never read as "no accounts yet": the next sign-up would become the admin
+ * and the next save would wipe everyone. The last good copy is used instead, or nothing works.
+ */
 async function loadAll() {
     try {
-        const value = JSON.parse(await readFile(USERS_FILE, "utf8"));
-        return value && typeof value === "object" && value.users && typeof value.users === "object" ? value : { users: {} };
-    } catch {
-        return { users: {} };
+        return await parseUsers(USERS_FILE);
+    } catch (err) {
+        if (err?.code === "ENOENT") return { users: {} };
+        try {
+            return await parseUsers(USERS_BACKUP);
+        } catch {
+            throw new Error("ไฟล์บัญชี (data/users.json) เสีย ตรวจหรือกู้จาก users.json.bak ก่อน");
+        }
     }
 }
 
@@ -33,6 +49,8 @@ function change(fn) {
     return withFileLock(USERS_FILE, async () => {
         const all = await loadAll();
         const result = await fn(all);
+        // Keep the previous good version beside it, like settings.json
+        if (Object.keys(all.users).length) await readFile(USERS_FILE, "utf8").then((t) => writeAtomic(USERS_BACKUP, t)).catch(() => {});
         await writeAtomic(USERS_FILE, `${JSON.stringify(all, null, 1)}\n`);
         return result;
     });
@@ -89,15 +107,16 @@ export async function inviteCode({ rotate = false } = {}) {
     const settings = await loadSettings();
     if (settings?.inviteCode && !rotate) return settings.inviteCode;
     const code = crypto.randomBytes(5).toString("hex");
-    await saveSettings({ inviteCode: code });
-    return code;
+    // Decided inside the settings lock, so two first asks can't hand out two different codes
+    const saved = await saveSettings((current) => (current?.inviteCode && !rotate ? {} : { inviteCode: code }));
+    return saved.inviteCode;
 }
 
 /**
  * Makes an account. The very first one is the admin (the person running this server) and needs no invite.
  * @returns {Promise<object>} the new user
  */
-export async function register({ name, handle, password, invite = "" }) {
+export async function register({ name, handle, password, invite = "" }, { allowFirst = true } = {}) {
     const n = cleanName(name);
     const h = cleanHandle(handle);
     if (!n) throw new Error("ใส่ชื่อที่แสดงก่อน");
@@ -108,6 +127,7 @@ export async function register({ name, handle, password, invite = "" }) {
     return change((all) => {
         const list = Object.values(all.users);
         const isFirst = list.length === 0;
+        if (isFirst && !allowFirst) throw new Error("บัญชีแรก (ผู้ดูแลระบบ) ต้องสมัครบนคอมที่เปิดเซิร์ฟเวอร์");
         if (!isFirst && String(invite ?? "").trim() !== code) throw new Error("รหัสเชิญไม่ถูกต้อง (ขอจากคนที่เปิดเซิร์ฟเวอร์)");
         if (list.some((u) => u.handle === h)) throw new Error("ไอดีนี้มีคนใช้แล้ว");
         const user = blank({ id: newUserId(), handle: h, name: n, passHash, role: isFirst ? "admin" : "user", createdAt: Date.now() });

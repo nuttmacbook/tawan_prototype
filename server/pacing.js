@@ -1,6 +1,6 @@
 import { loadState } from "./mood.js";
 import { loadTexts } from "./store.js";
-import { currentId } from "./profiles.js";
+import { currentId, currentKey } from "./profiles.js";
 import { todayActivities, dayKind } from "./world.js";
 
 /* ------------------------------------ config */
@@ -109,7 +109,8 @@ function activityAt(now, { hour, isInChat, isAsleep, lonely, activities }) {
 const rolled = new Map();
 /** True the first time this exact batch of messages is planned (per character, for 6 hours) */
 function firstRoll(texts) {
-    const key = `${currentId()}\u0000${texts.join("\u0000")}`;
+    // Per chat: two people sending the same words each get their own roll
+    const key = `${currentKey()}\u0000${texts.join("\u0000")}`;
     const now = Date.now();
     for (const [ k, at ] of rolled) if (now - at > 6 * 3600000) rolled.delete(k);
     if (rolled.has(key)) return false;
