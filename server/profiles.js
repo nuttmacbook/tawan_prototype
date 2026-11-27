@@ -525,10 +525,7 @@ async function adoptNow(user) {
         if (await exists(path.join(dir, "owner.json"))) continue;
         const chat = chatDirOf(id, owner);
         await mkdir(chat, { recursive: true });
-        for (const name of CHAT_THINGS) {
-            const from = path.join(dir, name);
-            if ((await exists(from)) && !(await exists(path.join(chat, name)))) await rename(from, path.join(chat, name));
-        }
+        await mergeLegacy(id, owner);
         const personaFile = path.join(dir, "persona.md");
         const { persona, relation } = splitRelation(await readText(personaFile));
         if (relation) {
@@ -552,6 +549,132 @@ async function adoptNow(user) {
         moved.push(id);
     }
     return moved;
+}
+
+/* ------------------------------------ merging what was left behind */
+
+// The move above can find the chat already started (or a file it can't move right then, e.g. on
+// Windows). Skipping would leave her whole past with you in the old place while the chat starts
+// blank, so everything is merged instead, and every original is kept in data/.trash.
+
+/** "# title\n> notes\n\n## topic\n- fact" → header lines and sections */
+function sectionsOf(text) {
+    const header = [];
+    const sections = [];
+    for (const line of String(text ?? "").split("\n")) {
+        if (/^##\s/.test(line)) sections.push({ title: line.trim(), lines: [] });
+        else if (sections.length) sections.at(-1).lines.push(line);
+        else header.push(line);
+    }
+    return { header, sections };
+}
+
+/**
+ * Older file first, then whatever the newer one adds: same topics merged, new topics at the end,
+ * lines already there not repeated. Exported for tests.
+ */
+export function mergeSectionText(older, newer) {
+    const a = sectionsOf(older);
+    const b = sectionsOf(newer);
+    if (!a.sections.length && !a.header.some((l) => l.trim() && !/^[#>]/.test(l))) return String(newer ?? "");
+    for (const sec of b.sections) {
+        const same = a.sections.find((x) => x.title === sec.title);
+        if (!same) {
+            a.sections.push(sec);
+            continue;
+        }
+        const seen = new Set(same.lines.map((l) => l.trim()).filter(Boolean));
+        while (same.lines.length && !same.lines.at(-1).trim()) same.lines.pop();
+        for (const line of sec.lines) {
+            if (line.trim() && !seen.has(line.trim())) {
+                same.lines.push(line);
+                seen.add(line.trim());
+            }
+        }
+        same.lines.push("");
+    }
+    const body = a.sections.map((x) => [ x.title, ...x.lines ].join("\n").replace(/\n+$/, "")).join("\n\n");
+    return `${a.header.join("\n").replace(/\n+$/, "")}\n\n${body}\n`;
+}
+
+/** The newer mood, but the closeness you'd already built (and every message counted) */
+export function mergeStateText(older, newer) {
+    const num = (text, label) => Number(String(text ?? "").match(new RegExp(`^- ${label}:\\s*([\\d.]+)`, "m"))?.[1] ?? NaN);
+    let out = String(newer ?? "");
+    const closeness = Math.max(num(older, "ความสนิท"), num(newer, "ความสนิท"));
+    if (Number.isFinite(closeness)) out = out.replace(/^- ความสนิท:.*$/m, `- ความสนิท: ${closeness}`);
+    const count = (num(older, "จำนวนข้อความ") || 0) + (num(newer, "จำนวนข้อความ") || 0);
+    if (count) out = out.replace(/^- จำนวนข้อความ:.*$/m, `- จำนวนข้อความ: ${count}`);
+    return out;
+}
+
+const SECTION_FILES = new Set([ "memory.md", "journal.md", "threads.md", "dates.md" ]);
+
+/** Moves a folder's files in; a day already in the chat gets the older day's lines first */
+async function mergeFolder(from, to, trash) {
+    await mkdir(to, { recursive: true });
+    for (const e of await readdir(from, { withFileTypes: true }).catch(() => [])) {
+        const src = path.join(from, e.name);
+        const dst = path.join(to, e.name);
+        if (e.isDirectory()) {
+            await mergeFolder(src, dst, path.join(trash, e.name));
+        } else if (!(await exists(dst))) {
+            await rename(src, dst).catch(() => cp(src, dst));
+        } else if (e.name.endsWith(".md")) {
+            const older = await readText(src);
+            const newer = await readText(dst);
+            await withFileLock(dst, () => writeAtomic(dst, `${older.trimEnd()}\n\n${newer.replace(/^#.*\n/, "").trim()}\n`));
+        }
+    }
+    // Whatever is left of the old folder goes to the trash, not away
+    if (await exists(from)) {
+        await mkdir(path.dirname(trash), { recursive: true });
+        await rename(from, trash).catch(() => cp(from, trash, { recursive: true }).then(() => rm(from, { recursive: true, force: true })));
+    }
+}
+
+/**
+ * Brings a relationship's files left in a character's own folder into one user's chat. Safe to run
+ * any number of times; does nothing when there's nothing left behind.
+ * @returns {Promise<string[]>} what was merged
+ */
+export async function mergeLegacy(id, user) {
+    const dir = botDir(safeId(id));
+    const chat = chatDirOf(id, safeUser(user));
+    const left = [];
+    for (const name of CHAT_THINGS) if (await exists(path.join(dir, name))) left.push(name);
+    if (!left.length) return [];
+    await mkdir(chat, { recursive: true });
+    const trash = path.join(TRASH_DIR, `before-accounts-${id}-${stamp()}`);
+    await mkdir(trash, { recursive: true });
+    for (const name of left) {
+        const from = path.join(dir, name);
+        const to = path.join(chat, name);
+        try {
+            const isTemplate = name.endsWith(".md") && (await readText(from)) === (await readText(path.join(TEMPLATE_DIR, name)));
+            if (name === "history" || name === "uploads") {
+                await mergeFolder(from, to, path.join(trash, name));
+                continue;
+            }
+            if (!isTemplate && !(await exists(to))) {
+                await rename(from, to);
+                continue;
+            }
+            if (!isTemplate && SECTION_FILES.has(name)) {
+                const merged = mergeSectionText(await readText(from), await readText(to));
+                await withFileLock(to, () => writeAtomic(to, merged));
+            } else if (!isTemplate && name === "state.md") {
+                const merged = mergeStateText(await readText(from), await readText(to));
+                await withFileLock(to, () => writeAtomic(to, merged));
+            }
+            // relation.md, pending/usage/coach and the rest: the chat's own copy stays, the old one is kept aside
+            await rename(from, path.join(trash, name));
+        } catch (err) {
+            console.error(`  ⚠️ ย้าย ${name} ของ ${id} ไม่สำเร็จ (จะลองใหม่ตอนเปิดครั้งหน้า):`, err?.message ?? err);
+        }
+    }
+    console.log(`  🔀 รวมแชทเดิมของ ${id} เข้าบัญชี (${left.join(", ")}) · ต้นฉบับอยู่ใน ${path.relative(DATA_DIR, trash)}`);
+    return left;
 }
 
 export { DATA_DIR, PERSONAS_DIR, MD_FILES, DATA_FILES, BOT_MD, USER_ID };

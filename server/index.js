@@ -50,6 +50,11 @@ await profiles.initProfiles();
     const admin = (await users.listUsers()).find((u) => u.role === "admin");
     if (admin) {
         for (const id of await profiles.adoptLegacy(admin.id)) await users.addChat(admin.id, id);
+        // A chat whose past was left in the character's own folder (an earlier move that skipped it) gets it back
+        for (const p of await profiles.listProfiles()) {
+            const meta = await profiles.botMeta(p.id);
+            if (meta.owner) await profiles.mergeLegacy(p.id, meta.owner).catch((err) => console.error(err));
+        }
     }
     // Which character each user had on screen, so background work knows before they come back
     for (const u of await users.listUsers()) profiles.setActiveFor(u.id, u.activeBot);
