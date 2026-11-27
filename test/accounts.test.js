@@ -131,3 +131,36 @@ test("a damaged accounts file never reads as 'no accounts yet'", async () => {
     await writeFile(file, good);
 });
 
+
+test("mergeLegacy: a past left in her own folder joins the chat, nothing lost, safe to repeat", async () => {
+    const dir = path.join(process.env.PERSONA_DATA_DIR, "personas", "old");
+    const chat = profiles.chatDirOf("old", admin.id);
+    // As if an earlier move had skipped: the old chat is back in her folder while the new one has started
+    await writeFile(path.join(dir, "memory.md"), "# ความจำ\n\n## เกี่ยวกับผู้ใช้\n- [2026-10-01] เก่า: ชอบซูชิ\n\n## มุก\n- ไก่ทอด\n");
+    await mkdir(path.join(dir, "history", "archive"), { recursive: true });
+    await writeFile(path.join(dir, "history", "archive", "2026-09-30.md"), "# บทสนทนา 2026-09-30\n\n[09:00] *ผู้ใช้*: วันเก่า\n");
+    await writeFile(path.join(dir, "state.md"), "## ความสัมพันธ์\n- ความสนิท: 100\n- จำนวนข้อความ: 200\n");
+    await writeFile(path.join(chat, "state.md"), "## ความสัมพันธ์\n- ความสนิท: 30\n- จำนวนข้อความ: 10\n");
+
+    const merged = await profiles.mergeLegacy("old", admin.id);
+    assert.ok(merged.includes("memory.md") && merged.includes("history"));
+    const memory = await readFile(path.join(chat, "memory.md"), "utf8");
+    assert.match(memory, /ชอบซูชิ/);
+    assert.match(memory, /กาแฟดำ/);
+    assert.match(memory, /## มุก\n- ไก่ทอด/);
+    assert.ok((await readdir(path.join(chat, "history", "archive"))).includes("2026-09-30.md"));
+    const state = await readFile(path.join(chat, "state.md"), "utf8");
+    assert.match(state, /ความสนิท: 100/);
+    assert.match(state, /จำนวนข้อความ: 210/);
+    assert.deepEqual(await profiles.mergeLegacy("old", admin.id), []);
+    // The originals are kept
+    const trash = (await readdir(path.join(process.env.PERSONA_DATA_DIR, ".trash"))).filter((n) => n.startsWith("before-accounts-old"));
+    assert.ok(trash.length >= 1);
+});
+
+test("mergeSectionText: same topics joined, no repeats, new topics kept", () => {
+    const out = profiles.mergeSectionText("# ก\n\n## A\n- 1\n- 2\n", "# ก\n\n## A\n- 2\n- 3\n\n## B\n- x\n");
+    assert.match(out, /## A\n- 1\n- 2\n- 3/);
+    assert.match(out, /## B\n- x/);
+    assert.equal(out.match(/- 2/g).length, 1);
+});
